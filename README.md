@@ -1,126 +1,275 @@
-# Distributed three-tier store demo
+# Sistema distribuido de tres capas
 
-The stack serves a static storefront through three Nginx presentation nodes. Its
-Node.js application tier queries a MariaDB Galera cluster for the ten cheapest
-products, caches that list in Redis, and stores product reviews in MongoDB.
-HAProxy instances distribute requests within each tier, and Keepalived provides
-a master/backup virtual IP for each HAProxy pair.
+Proyecto académico para la materia **Sistemas Distribuidos**. El equipo diseñó
+una tienda web distribuida con balanceo en las capas de presentación y
+aplicación, almacenamiento relacional y NoSQL, y una caché para el catálogo.
 
-## Architecture
+**Integrantes:** Javier Rodriguez Rodriguez y Adriana Dzib De la Rosa
+
+**Docente:** Ismael Jiménez Sánchez
+
+**Tarea:** #995
+
+## Arquitectura
+
+La infraestructura se ejecuta con Docker Compose en un solo host. Incluye dos
+pares HAProxy master/backup con Keepalived, tres nodos web Nginx, tres nodos API
+Node.js, tres nodos MariaDB Galera, una instancia MongoDB y una instancia
+Redis.
+
+### Diagrama JPG
+
+**Pendiente del equipo:** insertar aquí la imagen JPG exportada desde Lucidchart
+(por ejemplo, `docs/arquitectura.jpg`). El diagrama Mermaid siguiente sirve
+como referencia mientras se agrega el archivo final.
+
+<!-- INSERTAR: ![Diagrama de arquitectura del sistema distribuido](docs/arquitectura.jpg) -->
 
 ```mermaid
 flowchart LR
-    browser[Browser]
-
-    subgraph edge["Presentation tier · edge network"]
-        plbM["HAProxy presentation master<br/>host port 80"]
-        plbB["HAProxy presentation backup"]
-        pka["Keepalived VRRP pair<br/>presentation VIP 172.30.0.250"]
-        web1["Nginx webnode1"]
-        web2["Nginx webnode2"]
-        web3["Nginx webnode3"]
-        plbM --- pka
-        plbB --- pka
-        plbM --> web1
-        plbM --> web2
-        plbM --> web3
-        plbB -. failover .-> web1
-        plbB -. failover .-> web2
-        plbB -. failover .-> web3
+    cliente[Usuario / navegador]
+    subgraph presentacion["Presentación"]
+        haprP["HAProxy master/backup<br/>Keepalived · VIP 172.30.0.250"]
+        web["Nginx web1 · web2 · web3"]
+        haprP --> web
     end
-
-    subgraph appnet["Application tier · internal application network"]
-        albM["HAProxy application master"]
-        albB["HAProxy application backup"]
-        aka["Keepalived VRRP pair<br/>application VIP 172.31.0.250"]
-        app1["API app1"]
-        app2["API app2"]
-        app3["API app3"]
-        albM --- aka
-        albB --- aka
-        albM --> app1
-        albM --> app2
-        albM --> app3
-        albB -. failover .-> app1
-        albB -. failover .-> app2
-        albB -. failover .-> app3
+    subgraph aplicacion["Aplicación"]
+        haprA["HAProxy master/backup<br/>Keepalived · VIP 172.31.0.250"]
+        api["API Node.js app1 · app2 · app3"]
+        haprA --> api
     end
-
-    subgraph data["Data tier · internal database network"]
-        redis[("Redis<br/>catalog cache")]
-        galera1[("MariaDB Galera node 1<br/>catalog queries")]
-        galera2[("MariaDB Galera node 2")]
-        galera3[("MariaDB Galera node 3")]
-        mongo[("MongoDB<br/>product reviews")]
-        galera1 <--> galera2
-        galera2 <--> galera3
-        galera3 <--> galera1
+    subgraph datos["Datos"]
+        galera["MariaDB Galera<br/>galera1 · galera2 · galera3"]
+        mongo[(MongoDB<br/>reseñas)]
+        redis[(Redis<br/>caché de catálogo)]
     end
-
-    browser -->|"HTTP :80"| plbM
-    web1 -->|"API via VIP"| aka
-    web2 -->|"API via VIP"| aka
-    web3 -->|"API via VIP"| aka
-    app1 -->|"cache lookup / invalidate"| redis
-    app2 -->|"cache lookup / invalidate"| redis
-    app3 -->|"cache lookup / invalidate"| redis
-    app1 -->|"cache miss: query catalog"| galera1
-    app2 -->|"cache miss: query catalog"| galera1
-    app3 -->|"cache miss: query catalog"| galera1
-    app1 -->|"read/write reviews"| mongo
-    app2 -->|"read/write reviews"| mongo
-    app3 -->|"read/write reviews"| mongo
+    cliente --> haprP
+    web --> haprA
+    api --> galera
+    api --> mongo
+    api --> redis
 ```
 
-Product-list requests check Redis first; a cache miss queries MariaDB and then
-populates Redis. Review requests use MongoDB, with MariaDB used to verify the
-product before a review is inserted. In this single-host Compose setup, host
-port 80 is published by the presentation master container; the presentation
-VIP does not move Docker's host-port mapping during failover.
+### Responsabilidad de las capas
 
-## Run locally
+- **Presentación:** HAProxy distribuye las solicitudes entre `web1`, `web2` y
+  `web3`. Keepalived administra una VIP entre los HAProxy.
+- **Aplicación:** HAProxy distribuye las solicitudes entre `app1`, `app2` y
+  `app3`. La API ofrece catálogo, reseñas y estado de salud.
+- **Datos:** MariaDB Galera almacena el catálogo; MongoDB almacena las reseñas;
+  Redis conserva durante 60 segundos la respuesta de productos más baratos.
 
-1. Copy `.env.example` to `.env` and replace the example passwords.
-2. Start the stack with `docker compose up --build`.
-3. Open `http://localhost/` for the storefront and
-   `http://localhost:8088/` for Nagios.
+### Alcance actual
 
-The product endpoint is `http://localhost/api/products/cheapest`; it returns
-JSON sorted by ascending price. The storefront calls this endpoint and renders
-the returned products. Schema creation and sample data insertion are
-idempotently performed by the `catalog-init` service after the first Galera
-node is healthy.
+Los tres nodos Galera están configurados como clúster, pero la API y el
+inicializador se conectan directamente a `galera1`. La aplicación no balancea
+consultas entre nodos ni cambia automáticamente a `galera2` o `galera3` si
+`galera1` falla. MongoDB y Redis son instancias únicas. Además, todo Compose se
+ejecuta en un solo host; esta demostración no ofrece alta disponibilidad ante
+la caída de ese host.
 
-The storefront also displays a live request pipeline for its product and
-review API requests. The API's `X-Request-Trace` response header records the
-presentation load balancer, selected web node, application load balancer,
-application node, and the actual data stores touched by that request.
-The storefront API explorer menu can query `/`, `/health`,
-`/products/cheapest`, and `/products/ST-001/reviews`.
+El puerto 80 del host está publicado en el contenedor
+`presentation-lb-master`. La VIP de presentación no traslada la publicación de
+puerto de Docker al contenedor backup. El failover de la VIP puede probarse
+desde la red Docker, pero no equivale a failover del acceso `localhost:80`.
 
-Use the storefront's API explorer menu to query the product, review, service
-information, and health endpoints. Its **Clear Redis catalog cache** button
-calls `POST /api/cache/clear`, which deletes only the cheapest-products cache
-entry; the next catalog request refills it from MariaDB.
+## Requisitos
 
-The application uses Redis to cache the cheapest-products response for 60
-seconds. MongoDB stores product reviews: use
-`GET /api/products/ST-001/reviews` to read reviews or send JSON such as
-`{"reviewer":"Taylor","rating":5,"comment":"Great bag."}` to
-`POST /api/products/ST-001/reviews` to add one. The initialization service
-creates the review index and inserts sample reviews idempotently. MongoDB and
-Redis are private to the database network and are not published on host ports.
+- Windows 10/11 con Docker Desktop iniciado y el motor de contenedores Linux.
+- Docker Compose v2 (`docker compose`).
+- PowerShell.
+- Puertos locales 80 y 8088 disponibles.
+- Para la PoC de carga: ApacheBench (`ab`) instalado, o JMeter.
 
-## Load-balancer failover
+## Ejecución en Windows
 
-The presentation VIP is `172.30.0.250` and the application VIP is
-`172.31.0.250`. Each Keepalived pair shares its HAProxy container's network
-namespace, uses unicast VRRP, and tracks the local HAProxy listener. Application
-requests from Nginx use the floating application VIP.
+Abre PowerShell en la carpeta raíz del repositorio. El archivo `.env` contiene
+configuración local y está excluido de Git para evitar publicar contraseñas. Si
+no existe (por ejemplo, después de clonar el repositorio), créalo y agrega las
+variables requeridas:
 
-Compose publishes host port 80 on the presentation master container. Docker's
-published-port mapping targets that specific container, so on a single-host
-Compose deployment the VIP failover does not move the host port mapping. The
-presentation VIP is available to other containers on the edge network; expose
-it through a host/network setup that supports floating VIPs if host-level
-failover is required.
+```powershell
+notepad .env
+```
+
+Contenido inicial de `.env`:
+
+```dotenv
+MARIADB_ROOT_PASSWORD=change-this-root-password
+MARIADB_BACKUP_PASSWORD=change-this-backup-password
+CATALOG_DB_NAME=store
+CATALOG_DB_USER=store_app
+CATALOG_DB_PASSWORD=change-this-catalog-password
+MONGO_DB_NAME=store_reviews
+MONGO_ROOT_USERNAME=store_admin
+MONGO_ROOT_PASSWORD=change-this-mongodb-password
+NAGIOSADMIN_PASSWORD=change-this-nagios-password
+```
+
+Reemplaza todas las contraseñas de ejemplo por valores propios. No publiques
+`.env` ni uses estas credenciales de demostración en un servidor compartido.
+Después, construye e inicia todos los servicios:
+
+```powershell
+docker compose up --build -d
+docker compose ps
+```
+
+La primera ejecución puede tardar mientras Docker descarga imágenes y Galera
+se inicializa. Confirma que los servicios estén iniciados y revisa los logs si
+alguno falla:
+
+```powershell
+docker compose logs --tail 100 catalog-init app1 app2 app3 galera1 galera2 galera3
+```
+
+Direcciones locales:
+
+- Tienda: <http://localhost/>
+- API de salud: <http://localhost/api/health>
+- Productos más baratos: <http://localhost/api/products/cheapest>
+- Reseñas de `ST-001`: <http://localhost/api/products/ST-001/reviews>
+- Nagios: <http://localhost:8088/> (usuario `nagiosadmin`; contraseña de `.env`)
+
+La tienda muestra la ruta de las solicitudes. El encabezado `X-Request-Trace`
+identifica los balanceadores, nodos y almacenes involucrados. El endpoint
+`POST /api/cache/clear` elimina la entrada de caché del catálogo.
+
+Para detener los contenedores sin borrar los datos persistidos:
+
+```powershell
+docker compose down
+```
+
+Para borrar también los volúmenes de MariaDB y MongoDB y reiniciar los datos
+desde cero, usa `docker compose down -v`. Esta operación es destructiva.
+
+## PoC 1: Prueba de carga
+
+**Objetivo:** medir la respuesta del endpoint de catálogo bajo concurrencia y
+comprobar que la API continúa respondiendo. Ejecútala con el sistema levantado
+y comienza con una carga moderada.
+
+Con ApacheBench (`ab`) disponible en `PATH`:
+
+```powershell
+ab -n 500 -c 20 http://localhost/api/products/cheapest
+```
+
+`-n` indica el total de solicitudes y `-c` la concurrencia. Para medir una
+petición de caché fría, elimina la entrada primero y ejecuta una sola vez con
+`-c 1`; para medir caché caliente, repite la prueba normal:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost/api/cache/clear
+ab -n 1 -c 1 http://localhost/api/products/cheapest
+ab -n 500 -c 20 http://localhost/api/products/cheapest
+```
+
+Si no tienes `ab`, crea un plan en JMeter con un grupo de hilos, el endpoint
+`GET /api/products/cheapest`, una carga inicial de 20 usuarios y 500 iteraciones,
+y un listener de resumen. No aumentes la carga sin vigilar CPU, memoria y logs.
+
+**Registrar en el informe:** herramienta y versión, fecha, concurrencia,
+solicitudes completadas, solicitudes fallidas, tiempo medio, percentiles y
+solicitudes por segundo. No se incluyen resultados hasta que el equipo ejecute
+la prueba en su entorno.
+
+**Espacio para resultados:**
+
+> Pendiente: agregar tabla, captura de ApacheBench/JMeter y análisis de los
+> resultados obtenidos por el equipo.
+
+## PoC 2: Failover simple
+
+**Objetivo:** comprobar que el HAProxy de aplicación deja de enviar tráfico a
+un nodo API detenido y continúa usando las réplicas disponibles.
+
+1. Confirma que el endpoint responde antes de la prueba:
+
+   ```powershell
+   curl.exe -i http://localhost/api/health
+   ```
+
+2. Detén temporalmente un nodo API:
+
+   ```powershell
+   docker compose stop app1
+   ```
+
+3. Espera unos segundos a que HAProxy detecte el nodo inactivo y consulta de
+   nuevo el endpoint. La respuesta debe ser `200`; el encabezado
+   `X-Request-Trace` debe mostrar `app2` o `app3` como nodo de aplicación:
+
+   ```powershell
+   curl.exe -i http://localhost/api/health
+   ```
+
+4. Recupera el servicio y confirma que volvió a responder:
+
+   ```powershell
+   docker compose start app1
+   curl.exe -i http://localhost/api/health
+   ```
+
+**Criterio de éxito:** las solicitudes siguen recibiendo HTTP 200 durante la
+caída de `app1`, atendidas por los nodos API restantes, y el servicio detenido
+se puede iniciar de nuevo. Guarda los encabezados y las horas de cada paso.
+
+Esta PoC prueba la tolerancia a la caída de una réplica API, no la alta
+disponibilidad del host ni el failover del puerto 80 publicado por Docker.
+
+## PoC 3: Chaos Engineering con Chaos Monkey
+
+**Objetivo:** inyectar una falla controlada en una réplica API, comprobar la
+hipótesis de que el servicio mantiene disponibilidad con las otras réplicas y
+restaurar el nodo al terminar.
+
+**Compatibilidad:** Netflix Chaos Monkey está pensado para entornos gestionados
+por Spinnaker y grupos de instancias en la nube; no está integrado ni se puede
+ejecutar directamente sobre este proyecto Docker Compose. No se debe reportar
+la prueba siguiente como una ejecución de Netflix Chaos Monkey. Es un
+experimento local de inyección de fallas inspirado en Chaos Monkey, usando
+Docker Compose.
+
+Ejecuta este bloque en PowerShell desde la raíz del repositorio. Selecciona al
+azar una réplica API, la detiene, prueba diez veces la ruta de salud y siempre
+intenta iniciarla de nuevo:
+
+```powershell
+$target = Get-Random -InputObject @("app1", "app2", "app3")
+Write-Host "Nodo seleccionado: $target"
+docker compose stop $target
+try {
+    for ($i = 1; $i -le 10; $i++) {
+        curl.exe --fail --silent --show-error http://localhost/api/health | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "La solicitud $i falló durante el experimento."
+        }
+        Write-Host "Solicitud $i: OK"
+    }
+}
+finally {
+    docker compose start $target
+}
+```
+
+**Límites y seguridad:** realiza esta prueba solo en el entorno local, nunca en
+una instalación compartida o productiva. No detengas Galera, MongoDB, Redis ni
+los balanceadores en este experimento inicial. Si una solicitud falla,
+registra el resultado y verifica la recuperación con
+`docker compose ps` y `curl.exe -i http://localhost/api/health`.
+
+**Espacio para resultados:**
+
+> Pendiente: documentar hipótesis, nodo afectado, duración, errores observados,
+> evidencia de recuperación y conclusiones del equipo. Para usar Netflix Chaos
+> Monkey real, se requiere migrar/desplegar la infraestructura en una plataforma
+> compatible con Spinnaker y documentar esa configuración por separado.
+
+## Documentación y evidencias
+
+Este README y los archivos Markdown del repositorio constituyen la
+documentación del proyecto. El equipo debe completar los espacios pendientes
+con el diagrama JPG exportado y las evidencias reales de las PoC antes de
+presentar resultados como ejecutados.

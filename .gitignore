@@ -1,7 +1,6 @@
-# Local environment files (keep the documented template tracked).
+# Local environment files; do not commit credentials.
 .env
 .env.*
-!.env.example
 
 # Credentials, private keys, and certificates.
 secrets/
