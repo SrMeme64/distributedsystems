@@ -39,13 +39,15 @@ flowchart LR
         haprA --> api
     end
     subgraph datos["Datos"]
-        galera["MariaDB Galera<br/>galera1 · galera2 · galera3"]
+        galera1["MariaDB Galera<br/>galera1"]
+        galeraRest["Nodos Galera<br/>galera2 · galera3"]
         mongo[(MongoDB<br/>reseñas)]
         redis[(Redis<br/>caché de catálogo)]
+        galera1 <--> galeraRest
     end
     cliente --> haprP
     web --> haprA
-    api --> galera
+    api -->|"conexión actual directa"| galera1
     api --> mongo
     api --> redis
 ```
@@ -61,17 +63,70 @@ flowchart LR
 
 ### Alcance actual
 
-Los tres nodos Galera están configurados como clúster, pero la API y el
-inicializador se conectan directamente a `galera1`. La aplicación no balancea
-consultas entre nodos ni cambia automáticamente a `galera2` o `galera3` si
-`galera1` falla. MongoDB y Redis son instancias únicas. Además, todo Compose se
-ejecuta en un solo host; esta demostración no ofrece alta disponibilidad ante
-la caída de ese host.
+Los tres nodos MariaDB forman un clúster Galera, pero actualmente la API y el
+inicializador se conectan directamente a `galera1`. Tener replicación Galera
+no hace que el cliente distribuya sus conexiones: si `galera1` falla, la
+aplicación no cambia automáticamente a `galera2` o `galera3`. MongoDB y Redis
+son instancias únicas. Además, todo Compose se ejecuta en un solo host; esta
+demostración no ofrece alta disponibilidad ante la caída de ese host.
 
-El puerto 80 del host está publicado en el contenedor
-`presentation-lb-master`. La VIP de presentación no traslada la publicación de
-puerto de Docker al contenedor backup. El failover de la VIP puede probarse
-desde la red Docker, pero no equivale a failover del acceso `localhost:80`.
+### Acceso desde el segundo equipo
+
+El equipo que ejecuta Docker Compose es el **host del servicio**; las otras
+computadoras de la misma red local actúan como **clientes de prueba**. El puerto
+80 publicado por Docker se consume usando la dirección IPv4 LAN del host, por
+ejemplo `http://192.168.1.50/`, no usando `localhost`: en el segundo equipo,
+`localhost` se refiere a ese propio equipo.
+
+1. Conecta ambos equipos a la misma red local y levanta el proyecto en el host:
+
+    ```powershell
+    docker compose up --build -d
+    ```
+
+2. En el host, consulta su dirección IPv4 con `ipconfig`. Usa la dirección de
+    la interfaz conectada a la misma red que el equipo cliente (por ejemplo,
+    `192.168.1.50`; no uses `127.0.0.1`). Para filtrar las direcciones IPv4:
+
+    ```powershell
+    ipconfig | findstr /i "IPv4"
+    ```
+
+3. Desde el segundo equipo, comprueba que el puerto web del host es alcanzable,
+    sustituyendo la IP de ejemplo:
+
+    ```powershell
+    Test-NetConnection 192.168.1.50 -Port 80
+    ```
+
+    Si `TcpTestSucceeded` es `False`, comprueba que Docker sigue activo, que
+    ambos equipos están en la misma LAN y que el firewall del host permite TCP/80
+    en el perfil de red privada. Si es necesario, un administrador puede crear
+    una regla limitada a ese perfil:
+
+    ```powershell
+    New-NetFirewallRule -DisplayName "Distributed Store HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Private
+    ```
+
+4. Abre en el navegador del segundo equipo `http://192.168.1.50/`, usando la
+    IP real del host. La API también se puede verificar desde ese equipo en
+    `http://192.168.1.50/api/health`.
+
+Conviene reservar la IP del host en el router o verificarla antes de cada
+sesión. El proyecto y Docker Compose se ejecutan en un solo host; el equipo
+cliente no necesita iniciar otra copia del stack. Las pruebas que detienen o
+inician contenedores se ejecutan en el host, mientras la carga y las
+comprobaciones HTTP se hacen desde el cliente. No publiques Nagios en redes no
+confiables; el puerto 8088 debe permanecer restringido al host o al equipo de
+administración.
+
+El puerto 80 está publicado específicamente en `presentation-lb-master`. Por
+eso, acceder a la IP LAN prueba la aplicación y los nodos detrás del HAProxy
+master, pero no prueba el failover del HAProxy de presentación. La VIP
+`172.30.0.250` pertenece a la red Docker y no debe suponerse accesible desde la
+LAN. Para probar failover de presentación desde el segundo equipo se requeriría
+una VIP enrutable en la LAN (por ejemplo, con una red de capa 2 compatible) o
+un balanceador externo; eso queda fuera de esta configuración local actual.
 
 ## Requisitos
 
@@ -123,13 +178,16 @@ alguno falla:
 docker compose logs --tail 100 catalog-init app1 app2 app3 galera1 galera2 galera3
 ```
 
-Direcciones locales:
+Direcciones desde el host Docker:
 
 - Tienda: <http://localhost/>
 - API de salud: <http://localhost/api/health>
 - Productos más baratos: <http://localhost/api/products/cheapest>
 - Reseñas de `ST-001`: <http://localhost/api/products/ST-001/reviews>
 - Nagios: <http://localhost:8088/> (usuario `nagiosadmin`; contraseña de `.env`)
+
+Desde el otro equipo, sustituye `localhost` por la IP LAN del host, por
+ejemplo `http://192.168.1.50/` y `http://192.168.1.50/api/health`.
 
 La tienda muestra la ruta de las solicitudes. El encabezado `X-Request-Trace`
 identifica los balanceadores, nodos y almacenes involucrados. El endpoint
@@ -150,10 +208,13 @@ desde cero, usa `docker compose down -v`. Esta operación es destructiva.
 comprobar que la API continúa respondiendo. Ejecútala con el sistema levantado
 y comienza con una carga moderada.
 
-Con ApacheBench (`ab`) disponible en `PATH`:
+En el equipo cliente, define la dirección LAN del host Docker y ejecuta
+ApacheBench (`ab`) desde allí. Sustituye la IP del ejemplo por la dirección
+obtenida con `ipconfig` en el host:
 
 ```powershell
-ab -n 500 -c 20 http://localhost/api/products/cheapest
+$baseUrl = "http://192.168.1.50"
+ab -n 500 -c 20 "$baseUrl/api/products/cheapest"
 ```
 
 `-n` indica el total de solicitudes y `-c` la concurrencia. Para medir una
@@ -161,9 +222,10 @@ petición de caché fría, elimina la entrada primero y ejecuta una sola vez con
 `-c 1`; para medir caché caliente, repite la prueba normal:
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost/api/cache/clear
-ab -n 1 -c 1 http://localhost/api/products/cheapest
-ab -n 500 -c 20 http://localhost/api/products/cheapest
+$baseUrl = "http://192.168.1.50"
+Invoke-RestMethod -Method Post -Uri "$baseUrl/api/cache/clear"
+ab -n 1 -c 1 "$baseUrl/api/products/cheapest"
+ab -n 500 -c 20 "$baseUrl/api/products/cheapest"
 ```
 
 Si no tienes `ab`, crea un plan en JMeter con un grupo de hilos, el endpoint
@@ -185,32 +247,38 @@ la prueba en su entorno.
 **Objetivo:** comprobar que el HAProxy de aplicación deja de enviar tráfico a
 un nodo API detenido y continúa usando las réplicas disponibles.
 
-1. Confirma que el endpoint responde antes de la prueba:
+1. En el equipo cliente, define la dirección LAN del host y confirma que el
+    endpoint responde:
 
    ```powershell
-   curl.exe -i http://localhost/api/health
+    $baseUrl = "http://192.168.1.50"
+    curl.exe -i "$baseUrl/api/health"
    ```
 
-2. Detén temporalmente un nodo API:
+2. En una terminal PowerShell del host Docker, detén temporalmente un nodo API:
 
    ```powershell
    docker compose stop app1
    ```
 
-3. Espera unos segundos a que HAProxy detecte el nodo inactivo y consulta de
-   nuevo el endpoint. La respuesta debe ser `200`; el encabezado
-   `X-Request-Trace` debe mostrar `app2` o `app3` como nodo de aplicación:
+3. Desde el equipo cliente, espera unos segundos a que HAProxy detecte el nodo
+    inactivo y consulta de nuevo. La respuesta debe ser `200`; el encabezado
+    `X-Request-Trace` debe mostrar `app2` o `app3` como nodo de aplicación:
 
    ```powershell
-   curl.exe -i http://localhost/api/health
+    curl.exe -i "$baseUrl/api/health"
    ```
 
-4. Recupera el servicio y confirma que volvió a responder:
+4. En el host Docker, recupera el servicio. Confirma desde el cliente que volvió
+    a responder:
 
    ```powershell
    docker compose start app1
-   curl.exe -i http://localhost/api/health
    ```
+
+    ```powershell
+    curl.exe -i "$baseUrl/api/health"
+    ```
 
 **Criterio de éxito:** las solicitudes siguen recibiendo HTTP 200 durante la
 caída de `app1`, atendidas por los nodos API restantes, y el servicio detenido
@@ -221,9 +289,9 @@ disponibilidad del host ni el failover del puerto 80 publicado por Docker.
 
 ## PoC 3: Chaos Engineering con Chaos Monkey
 
-**Objetivo:** inyectar una falla controlada en una réplica API, comprobar la
-hipótesis de que el servicio mantiene disponibilidad con las otras réplicas y
-restaurar el nodo al terminar.
+**Objetivo:** inyectar desde el host una falla controlada en una réplica API y
+comprobar desde el equipo cliente la hipótesis de que el servicio mantiene
+disponibilidad con las otras réplicas.
 
 **Compatibilidad:** Netflix Chaos Monkey está pensado para entornos gestionados
 por Spinnaker y grupos de instancias en la nube; no está integrado ni se puede
@@ -232,22 +300,18 @@ la prueba siguiente como una ejecución de Netflix Chaos Monkey. Es un
 experimento local de inyección de fallas inspirado en Chaos Monkey, usando
 Docker Compose.
 
-Ejecuta este bloque en PowerShell desde la raíz del repositorio. Selecciona al
-azar una réplica API, la detiene, prueba diez veces la ruta de salud y siempre
-intenta iniciarla de nuevo:
+En el host Docker, ejecuta el bloque desde la raíz del repositorio. Selecciona
+al azar una réplica, la detiene durante 15 segundos y siempre intenta
+restaurarla. Durante esa ventana, ejecuta comprobaciones desde el equipo
+cliente con la PoC de failover anterior, apuntando a la IP LAN del host.
 
 ```powershell
 $target = Get-Random -InputObject @("app1", "app2", "app3")
 Write-Host "Nodo seleccionado: $target"
 docker compose stop $target
 try {
-    for ($i = 1; $i -le 10; $i++) {
-        curl.exe --fail --silent --show-error http://localhost/api/health | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "La solicitud $i falló durante el experimento."
-        }
-        Write-Host "Solicitud $i: OK"
-    }
+    Write-Host "Falla inyectada por 15 segundos; ejecutar sondeos desde el cliente."
+    Start-Sleep -Seconds 15
 }
 finally {
     docker compose start $target
@@ -258,7 +322,8 @@ finally {
 una instalación compartida o productiva. No detengas Galera, MongoDB, Redis ni
 los balanceadores en este experimento inicial. Si una solicitud falla,
 registra el resultado y verifica la recuperación con
-`docker compose ps` y `curl.exe -i http://localhost/api/health`.
+`docker compose ps` en el host y `curl.exe -i http://192.168.1.50/api/health`
+desde el cliente (sustituye la IP por la del host Docker).
 
 **Espacio para resultados:**
 
