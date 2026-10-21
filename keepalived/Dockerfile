@@ -9,4 +9,4 @@ ARG KEEPALIVED_CONFIG
 COPY ${KEEPALIVED_CONFIG} /etc/keepalived/keepalived.conf
 RUN chmod 0644 /etc/keepalived/keepalived.conf
 
-ENTRYPOINT ["keepalived", "--dont-fork", "--log-console", "--use-file=/etc/keepalived/keepalived.conf"]
+ENTRYPOINT ["sh", "-c", "rm -f /run/keepalived.pid /run/vrrp.pid /run/checkers.pid; exec keepalived --dont-fork --log-console --use-file=/etc/keepalived/keepalived.conf"]

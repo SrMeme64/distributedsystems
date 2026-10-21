@@ -1,0 +1,62 @@
+name: resilience-lab
+
+# Test tooling for the distributed-three-tier project.
+# Start the main stack first (docker compose up -d in the repository root).
+
+x-tool: &tool
+  restart: unless-stopped
+  command: ["sleep", "infinity"]
+  volumes:
+    - results:/results
+
+services:
+  ab:
+    <<: *tool
+    build: ./ab
+    container_name: lab-ab
+    networks: [edge]
+
+  siege:
+    <<: *tool
+    build: ./siege
+    container_name: lab-siege
+    networks: [edge]
+
+  jmeter:
+    <<: *tool
+    build: ./jmeter
+    container_name: lab-jmeter
+    networks: [edge]
+
+  chaosmonkey:
+    <<: *tool
+    build: ./chaosmonkey
+    container_name: lab-chaosmonkey
+    environment:
+      CHAOS_PROJECT: ${TARGET_PROJECT:-distributed-three-tier}
+    volumes:
+      - results:/results
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [edge]
+
+  dashboard:
+    build: ./dashboard
+    container_name: lab-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8090}:8090"
+    environment:
+      DEFAULT_TARGET: ${DEFAULT_TARGET:-http://presentation-entry}
+    volumes:
+      - results:/results
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: [ab, siege, jmeter, chaosmonkey]
+    networks: [edge]
+
+volumes:
+  results:
+
+networks:
+  edge:
+    name: ${TARGET_PROJECT:-distributed-three-tier}_edge
+    external: true

@@ -3,8 +3,6 @@ name: distributed-three-tier
 services:
   presentation-lb-master:
     image: haproxy:3.2-alpine
-    ports:
-      - "80:80"
     volumes:
       - ./haproxy/presentation-master.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     restart: unless-stopped
@@ -34,6 +32,19 @@ services:
     networks:
       edge:
         ipv4_address: 172.30.0.12
+
+  presentation-entry:
+    image: haproxy:3.2-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./haproxy/presentation-entry.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    restart: unless-stopped
+    depends_on:
+      - presentation-lb-master
+      - presentation-lb-backup
+    networks:
+      - edge
 
   presentation-keepalived-master:
     build:
