@@ -6,7 +6,7 @@ with a dashboard to launch each test, enter its parameters and read the results.
 ## Run
 
 ```sh
-docker compose up -d --build            # in the repository root (main stack)
+docker compose --env-file .env.exam up -d --build  # desde la raíz: stack principal
 cd resilience-lab && docker compose up -d --build
 open http://localhost:8090
 ```

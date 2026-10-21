@@ -28,6 +28,7 @@ como referencia mientras se agrega el archivo final.
 ```mermaid
 flowchart LR
     cliente[Usuario / navegador]
+    entry["HAProxy de entrada<br/>puerto 80 publicado"]
     subgraph presentacion["Presentación"]
         haprP["HAProxy master/backup<br/>Keepalived · VIP 172.30.0.250"]
         web["Nginx web1 · web2 · web3"]
@@ -45,7 +46,7 @@ flowchart LR
         redis[(Redis<br/>caché de catálogo)]
         galera1 <--> galeraRest
     end
-    cliente --> haprP
+    cliente --> entry --> haprP
     web --> haprA
     api -->|"conexión actual directa"| galera1
     api --> mongo
@@ -59,7 +60,8 @@ flowchart LR
 - **Aplicación:** HAProxy distribuye las solicitudes entre `app1`, `app2` y
   `app3`. La API ofrece catálogo, reseñas y estado de salud.
 - **Datos:** MariaDB Galera almacena el catálogo; MongoDB almacena las reseñas;
-  Redis conserva durante 60 segundos la respuesta de productos más baratos.
+  Redis conserva la respuesta de productos más baratos durante el TTL
+  configurado en `CATALOG_CACHE_TTL_SECONDS` (60 segundos por defecto).
 
 ### Alcance actual
 
@@ -81,7 +83,7 @@ ejemplo `http://192.168.1.50/`, no usando `localhost`: en el segundo equipo,
 1. Conecta ambos equipos a la misma red local y levanta el proyecto en el host:
 
     ```powershell
-    docker compose up --build -d
+    docker compose --env-file .env.exam up --build -d
     ```
 
 2. En el host, consulta su dirección IPv4 con `ipconfig`. Usa la dirección de
@@ -120,13 +122,13 @@ comprobaciones HTTP se hacen desde el cliente. No publiques Nagios en redes no
 confiables; el puerto 8088 debe permanecer restringido al host o al equipo de
 administración.
 
-El puerto 80 está publicado específicamente en `presentation-lb-master`. Por
-eso, acceder a la IP LAN prueba la aplicación y los nodos detrás del HAProxy
-master, pero no prueba el failover del HAProxy de presentación. La VIP
-`172.30.0.250` pertenece a la red Docker y no debe suponerse accesible desde la
-LAN. Para probar failover de presentación desde el segundo equipo se requeriría
-una VIP enrutable en la LAN (por ejemplo, con una red de capa 2 compatible) o
-un balanceador externo; eso queda fuera de esta configuración local actual.
+El puerto 80 está publicado en `presentation-entry`, que reenvía las solicitudes
+a la VIP Docker `172.30.0.250`. Keepalived mueve esa VIP entre
+`presentation-lb-master` y `presentation-lb-backup`, por lo que el acceso desde
+la IP LAN puede probar el failover de esos balanceadores. La VIP no se publica
+directamente en la LAN. `presentation-entry` y el host Docker siguen siendo
+puntos únicos de falla; esta configuración no ofrece alta disponibilidad ante
+la caída del host.
 
 ## Requisitos
 
@@ -138,16 +140,18 @@ un balanceador externo; eso queda fuera de esta configuración local actual.
 
 ## Ejecución en Windows
 
-Abre PowerShell en la carpeta raíz del repositorio. El archivo `.env` contiene
-configuración local y está excluido de Git para evitar publicar contraseñas. Si
-no existe (por ejemplo, después de clonar el repositorio), créalo y agrega las
-variables requeridas:
+Abre PowerShell en la carpeta raíz del repositorio. El archivo `.env.exam`
+incluido en el proyecto contiene valores de demostración para el entorno local.
+No agregues contraseñas reales a ese archivo ni las publiques. Para usar
+credenciales propias, crea un archivo local ignorado por Git (por ejemplo,
+`.env.local`) y reemplaza `.env.exam` por `.env.local` en los comandos
+`docker compose --env-file`:
 
 ```powershell
-notepad .env
+notepad .env.local
 ```
 
-Contenido inicial de `.env`:
+Contenido inicial de `.env.local`:
 
 ```dotenv
 MARIADB_ROOT_PASSWORD=change-this-root-password
@@ -158,16 +162,20 @@ CATALOG_DB_PASSWORD=change-this-catalog-password
 MONGO_DB_NAME=store_reviews
 MONGO_ROOT_USERNAME=store_admin
 MONGO_ROOT_PASSWORD=change-this-mongodb-password
+MONGO_APP_USERNAME=store_app
+MONGO_APP_PASSWORD=change-this-mongodb-app-password
+CATALOG_CACHE_TTL_SECONDS=60
 NAGIOSADMIN_PASSWORD=change-this-nagios-password
 ```
 
 Reemplaza todas las contraseñas de ejemplo por valores propios. No publiques
-`.env` ni uses estas credenciales de demostración en un servidor compartido.
-Después, construye e inicia todos los servicios:
+`.env.local` ni uses las credenciales de demostración de `.env.exam` en un
+servidor compartido. Para iniciar el entorno incluido en el proyecto, construye
+y levanta todos los servicios:
 
 ```powershell
-docker compose up --build -d
-docker compose ps
+docker compose --env-file .env.exam up --build -d
+docker compose --env-file .env.exam ps
 ```
 
 La primera ejecución puede tardar mientras Docker descarga imágenes y Galera
@@ -175,7 +183,7 @@ se inicializa. Confirma que los servicios estén iniciados y revisa los logs si
 alguno falla:
 
 ```powershell
-docker compose logs --tail 100 catalog-init app1 app2 app3 galera1 galera2 galera3
+docker compose --env-file .env.exam logs --tail 100 catalog-init app1 app2 app3 galera1 galera2 galera3
 ```
 
 Direcciones desde el host Docker:
@@ -184,7 +192,7 @@ Direcciones desde el host Docker:
 - API de salud: <http://localhost/api/health>
 - Productos más baratos: <http://localhost/api/products/cheapest>
 - Reseñas de `ST-001`: <http://localhost/api/products/ST-001/reviews>
-- Nagios: <http://localhost:8088/> (usuario `nagiosadmin`; contraseña de `.env`)
+- Nagios: <http://localhost:8088/> (usuario `nagiosadmin`; contraseña del archivo de entorno seleccionado)
 
 Desde el otro equipo, sustituye `localhost` por la IP LAN del host, por
 ejemplo `http://192.168.1.50/` y `http://192.168.1.50/api/health`.
@@ -192,15 +200,22 @@ ejemplo `http://192.168.1.50/` y `http://192.168.1.50/api/health`.
 La tienda muestra la ruta de las solicitudes. El encabezado `X-Request-Trace`
 identifica los balanceadores, nodos y almacenes involucrados. El endpoint
 `POST /api/cache/clear` elimina la entrada de caché del catálogo.
+La API se conecta a MongoDB con un usuario limitado a lectura y escritura en la
+base `store_reviews`; `catalog-init` usa la cuenta administrativa solo para
+crear o actualizar ese usuario durante la inicialización. La duración de la
+caché del catálogo se configura con `CATALOG_CACHE_TTL_SECONDS` (60 segundos
+por defecto). Las peticiones simultáneas a una caché vacía comparten una sola
+carga desde MariaDB.
 
 Para detener los contenedores sin borrar los datos persistidos:
 
 ```powershell
-docker compose down
+docker compose --env-file .env.exam down
 ```
 
 Para borrar también los volúmenes de MariaDB y MongoDB y reiniciar los datos
-desde cero, usa `docker compose down -v`. Esta operación es destructiva.
+desde cero, usa `docker compose --env-file .env.exam down -v`. Esta operación
+es destructiva.
 
 ## PoC 1: Prueba de carga
 
@@ -258,7 +273,7 @@ un nodo API detenido y continúa usando las réplicas disponibles.
 2. En una terminal PowerShell del host Docker, detén temporalmente un nodo API:
 
    ```powershell
-   docker compose stop app1
+   docker compose --env-file .env.exam stop app1
    ```
 
 3. Desde el equipo cliente, espera unos segundos a que HAProxy detecte el nodo
@@ -273,7 +288,7 @@ un nodo API detenido y continúa usando las réplicas disponibles.
     a responder:
 
    ```powershell
-   docker compose start app1
+   docker compose --env-file .env.exam start app1
    ```
 
     ```powershell
@@ -308,13 +323,13 @@ cliente con la PoC de failover anterior, apuntando a la IP LAN del host.
 ```powershell
 $target = Get-Random -InputObject @("app1", "app2", "app3")
 Write-Host "Nodo seleccionado: $target"
-docker compose stop $target
+docker compose --env-file .env.exam stop $target
 try {
     Write-Host "Falla inyectada por 15 segundos; ejecutar sondeos desde el cliente."
     Start-Sleep -Seconds 15
 }
 finally {
-    docker compose start $target
+    docker compose --env-file .env.exam start $target
 }
 ```
 
@@ -322,7 +337,8 @@ finally {
 una instalación compartida o productiva. No detengas Galera, MongoDB, Redis ni
 los balanceadores en este experimento inicial. Si una solicitud falla,
 registra el resultado y verifica la recuperación con
-`docker compose ps` en el host y `curl.exe -i http://192.168.1.50/api/health`
+`docker compose --env-file .env.exam ps` en el host y
+`curl.exe -i http://192.168.1.50/api/health`
 desde el cliente (sustituye la IP por la del host Docker).
 
 **Espacio para resultados:**

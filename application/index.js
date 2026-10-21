@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { MongoClient } from "mongodb";
 import mysql from "mysql2/promise";
 import { createClient } from "redis";
+import { getCachedOrLoad } from "./catalog-cache.js";
 
 const required = (name) => {
   const value = process.env[name];
@@ -28,7 +29,7 @@ const mongo = new MongoClient(
       username: required("MONGO_USER"),
       password: required("MONGO_PASSWORD"),
     },
-    authSource: "admin",
+    authSource: required("MONGO_DB"),
   },
 );
 const redis = createClient({
@@ -77,6 +78,10 @@ const start = async () => {
   await Promise.all([mongo.connect(), redis.connect()]);
   const reviews = mongo.db(required("MONGO_DB")).collection("product_reviews");
   const productsCacheKey = "store:products:cheapest";
+  const cacheTtlSeconds = Number(process.env.CATALOG_CACHE_TTL_SECONDS || 60);
+  if (!Number.isSafeInteger(cacheTtlSeconds) || cacheTtlSeconds < 1) {
+    throw new Error("CATALOG_CACHE_TTL_SECONDS must be a positive integer");
+  }
   const server = createServer((request, response) => {
     const trace = [
       request.headers["x-presentation-lb"] || "presentation-lb-unknown",
@@ -104,19 +109,25 @@ const start = async () => {
 
       if (request.method === "GET" && pathname === "/products/cheapest") {
         trace.push("redis");
-        const cached = await redis.get(productsCacheKey);
-        if (cached) {
+        const { value: products, cacheHit } = await getCachedOrLoad({
+          redis,
+          cacheKey: productsCacheKey,
+          ttlSeconds: cacheTtlSeconds,
+          load: async () => {
+            trace[trace.length - 1] = "redis (cache miss)";
+            trace.push("galera1");
+            const [rows] = await pool.execute(
+              "SELECT id, sku, name, description, price FROM products ORDER BY price ASC, id ASC LIMIT 10",
+            );
+            trace.push("redis (cache write)");
+            return rows;
+          },
+        });
+        if (cacheHit) {
           trace.push("cache hit");
-          sendJson(response, 200, JSON.parse(cached), trace);
+          sendJson(response, 200, products, trace);
           return;
         }
-        trace[trace.length - 1] = "redis (cache miss)";
-        trace.push("galera1");
-        const [products] = await pool.execute(
-          "SELECT id, sku, name, description, price FROM products ORDER BY price ASC, id ASC LIMIT 10",
-        );
-        trace.push("redis (cache write)");
-        await redis.set(productsCacheKey, JSON.stringify(products), { EX: 60 });
         sendJson(response, 200, products, trace);
         return;
       }

@@ -2,7 +2,10 @@
 
 El stack actual es una demostración en un solo host. Las siguientes tareas
 describen cómo evolucionarlo; no deben confundirse con componentes ya
-desplegados.
+desplegados. Para este proyecto académico, Compose permanece como el entorno
+reproducible del host; la segunda laptop se usa como cliente de las PoC LAN.
+No se declara alta disponibilidad multinodo ni se requiere contratar servicios
+administrados.
 
 ## 1. Probar desde dos equipos y aclarar el acceso
 
@@ -12,28 +15,31 @@ desplegados.
   Nagios restringido al equipo anfitrión o administración.
 - [ ] Registrar IP del host, topología de red, herramienta, resultados y
   evidencias de cada prueba.
-- [ ] Para probar failover de presentación desde la LAN, diseñar una VIP
-  enrutable o usar un balanceador externo; la VIP Docker actual no cumple ese
-  requisito.
+- [ ] Probar desde el cliente LAN el failover de los HAProxy de presentación a
+  través de `presentation-entry` y la VIP Docker `172.30.0.250`; registrar que
+  `presentation-entry` y el host siguen siendo puntos únicos de falla.
 
 ## 2. Reducir dependencias de datos de instancia única
 
-- [ ] Mover MongoDB a un servicio administrado o configurar un replica set
-  operado correctamente.
-- [ ] Mover Redis a un servicio administrado o configurar un modo apropiado de
-  alta disponibilidad.
-- [ ] Decidir si Redis es una caché descartable o si sus datos deben sobrevivir
-  a fallas.
+- [ ] Evaluar un replica set local para MongoDB si los recursos del host lo
+  permiten; documentar que no protege contra la caída del host.
+- [ ] Evaluar alta disponibilidad local para Redis solo si las PoC requieren
+  conservar la caché ante la caída de un contenedor.
+- [x] Definir Redis como caché descartable: los datos se pueden reconstruir
+  desde MariaDB.
 - [ ] Añadir monitoreo y planes de respaldo/restauración para MariaDB.
 - [ ] Probar regularmente los procedimientos de restauración.
 
 ## 3. Mejorar el comportamiento de caché
 
-- [ ] Definir claves y TTL para cada consulta almacenada en caché.
-- [ ] Invalidar las entradas afectadas cuando cambien los datos del catálogo.
-- [ ] Evitar estampidas de caché para que fallos simultáneos no consulten todos
-  MariaDB a la vez.
-- [ ] Mantener el endpoint de limpieza limitado a las claves de caché previstas.
+- [x] Definir una clave y un TTL configurable para la consulta de productos
+  más baratos.
+- [ ] Invalidar las entradas afectadas cuando cambien los datos del catálogo
+  (pendiente: el catálogo no tiene endpoints de escritura).
+- [x] Evitar estampidas de caché entre réplicas de API mediante un bloqueo
+  distribuido en Redis.
+- [x] Mantener el endpoint de limpieza limitado a la única clave de caché del
+  catálogo.
 
 ## 4. Añadir observabilidad
 
@@ -48,10 +54,12 @@ desplegados.
 
 ## 5. Reforzar seguridad y operación
 
-- [ ] Crear un usuario de aplicación MongoDB con privilegios mínimos en vez de
-  usar la cuenta root.
-- [ ] Proteger Redis si puede alcanzarse fuera de una red privada confiable.
-- [ ] Gestionar secretos fuera de archivos que se agregan al repositorio.
+- [x] Documentar el arranque del Compose principal con el archivo `.env.exam`
+  usando `--env-file`; guardar credenciales reales en `.env.local`, ignorado
+  por Git.
+- [x] Crear un usuario de aplicación MongoDB limitado a la base de reseñas en
+  vez de usar la cuenta root desde la API.
+- [x] Mantener Redis en la red interna de datos, sin publicar su puerto al host.
 - [ ] Añadir TLS en la entrada pública.
 - [ ] Añadir autenticación y límites de solicitudes a la API cuando corresponda.
 - [ ] Adoptar migraciones de base de datos.
@@ -60,10 +68,10 @@ desplegados.
 ## Orden de implementación sugerido
 
 1. Ejecutar las PoC desde dos equipos y registrar la configuración de red.
-2. Mantener y documentar la conexión actual de la aplicación a Galera sin
-  presentar failover SQL como una capacidad ya implementada.
-3. Diseñar failover de la entrada de presentación si se requiere fuera del host.
-4. Sustituir las instancias únicas de MongoDB y Redis por alternativas
-   administradas o replicadas.
-5. Mover las réplicas web y API a un orquestador multinodo y adoptar trazas
-   distribuidas.
+2. Añadir y probar respaldos/restauración de MariaDB en el host del proyecto.
+3. Incorporar observabilidad local y registrar resultados de rendimiento y
+   disponibilidad en las PoC.
+4. Evaluar replica set de MongoDB o HA de Redis solo si el hardware disponible
+   lo soporta; esto no resolvería la caída del host.
+5. Dejar orquestación multinodo y failover entre hosts como evolución futura,
+   sujeta a disponer de más hosts o infraestructura adicional.

@@ -185,14 +185,15 @@ services:
     environment: &application-environment
       DB_HOST: galera1
       DB_PORT: 3306
-      DB_NAME: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in .env}
-      DB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in .env}
-      DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in .env}
+      DB_NAME: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in the Compose env file}
+      DB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in the Compose env file}
+      DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in the Compose env file}
       MONGO_HOST: mongodb
       MONGO_PORT: 27017
-      MONGO_DB: ${MONGO_DB_NAME:?Set MONGO_DB_NAME in .env}
-      MONGO_USER: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in .env}
-      MONGO_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+      MONGO_DB: ${MONGO_DB_NAME:?Set MONGO_DB_NAME in the Compose env file}
+      MONGO_USER: ${MONGO_APP_USERNAME:?Set MONGO_APP_USERNAME in the Compose env file}
+      MONGO_PASSWORD: ${MONGO_APP_PASSWORD:?Set MONGO_APP_PASSWORD in the Compose env file}
+      CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:-60}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       APPLICATION_NODE: app1
@@ -233,7 +234,10 @@ services:
   catalog-init:
     build: ./application
     command: ["node", "init-db.js"]
-    environment: *application-environment
+    environment:
+      <<: *application-environment
+      MONGO_ADMIN_USER: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
+      MONGO_ADMIN_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
     volumes:
       - ./database/catalog.sql:/app/database/catalog.sql:ro
     restart: "no"
@@ -250,8 +254,8 @@ services:
   mongodb:
     image: mongo:8
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in .env}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
     volumes:
       - mongodb-data:/data/db
     healthcheck:
@@ -280,15 +284,15 @@ services:
   galera1:
     image: bitnamilegacy/mariadb-galera:11.4.7-debian-12-r3
     environment:
-      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in .env}
-      MARIADB_DATABASE: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in .env}
-      MARIADB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in .env}
-      MARIADB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in the Compose env file}
+      MARIADB_DATABASE: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in the Compose env file}
+      MARIADB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in the Compose env file}
+      MARIADB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in the Compose env file}
       MARIADB_GALERA_CLUSTER_NAME: distributed-cluster
       MARIADB_GALERA_CLUSTER_ADDRESS: gcomm://galera1,galera2,galera3
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "yes"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
-      MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in .env}
+      MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
     volumes:
       - galera1-data:/bitnami/mariadb
     healthcheck:
@@ -303,12 +307,12 @@ services:
   galera2:
     image: bitnamilegacy/mariadb-galera:11.4.7-debian-12-r3
     environment:
-      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in the Compose env file}
       MARIADB_GALERA_CLUSTER_NAME: distributed-cluster
       MARIADB_GALERA_CLUSTER_ADDRESS: gcomm://galera1,galera2,galera3
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "no"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
-      MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in .env}
+      MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
     volumes:
       - galera2-data:/bitnami/mariadb
     depends_on:
@@ -326,12 +330,12 @@ services:
   galera3:
     image: bitnamilegacy/mariadb-galera:11.4.7-debian-12-r3
     environment:
-      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in the Compose env file}
       MARIADB_GALERA_CLUSTER_NAME: distributed-cluster
       MARIADB_GALERA_CLUSTER_ADDRESS: gcomm://galera1,galera2,galera3
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "no"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
-      MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in .env}
+      MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
     volumes:
       - galera3-data:/bitnami/mariadb
     depends_on:
@@ -352,7 +356,7 @@ services:
       - "8088:80"
     environment:
       NAGIOSADMIN_USER: nagiosadmin
-      NAGIOSADMIN_PASS: ${NAGIOSADMIN_PASSWORD:?Set NAGIOSADMIN_PASSWORD in .env}
+      NAGIOSADMIN_PASS: ${NAGIOSADMIN_PASSWORD:?Set NAGIOSADMIN_PASSWORD in the Compose env file}
     volumes:
       - ./nagios/architecture.cfg:/opt/nagios/etc/objects/localhost.cfg:ro
     depends_on:

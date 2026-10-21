@@ -33,12 +33,16 @@ const connectToMariaDb = async () => {
 };
 
 const connection = await connectToMariaDb();
-const mongo = new MongoClient(
-  `mongodb://${required("MONGO_HOST")}:${Number(process.env.MONGO_PORT || 27017)}/${encodeURIComponent(required("MONGO_DB"))}`,
+const mongoHost = required("MONGO_HOST");
+const mongoPort = Number(process.env.MONGO_PORT || 27017);
+const mongoDatabase = required("MONGO_DB");
+const mongoAddress = `mongodb://${mongoHost}:${mongoPort}/${encodeURIComponent(mongoDatabase)}`;
+const mongoAdmin = new MongoClient(
+  mongoAddress,
   {
     auth: {
-      username: required("MONGO_USER"),
-      password: required("MONGO_PASSWORD"),
+      username: required("MONGO_ADMIN_USER"),
+      password: required("MONGO_ADMIN_PASSWORD"),
     },
     authSource: "admin",
   },
@@ -53,8 +57,41 @@ try {
 }
 
 try {
+  await mongoAdmin.connect();
+  const database = mongoAdmin.db(mongoDatabase);
+  const applicationUser = required("MONGO_USER");
+  const applicationPassword = required("MONGO_PASSWORD");
+  const users = await database.command({ usersInfo: applicationUser });
+  const roles = [{ role: "readWrite", db: mongoDatabase }];
+  if (users.users.length > 0) {
+    await database.command({
+      updateUser: applicationUser,
+      pwd: applicationPassword,
+      roles,
+    });
+  } else {
+    await database.command({
+      createUser: applicationUser,
+      pwd: applicationPassword,
+      roles,
+    });
+  }
+  console.log("MongoDB application user is ready");
+} finally {
+  await mongoAdmin.close();
+}
+
+const mongo = new MongoClient(mongoAddress, {
+  auth: {
+    username: required("MONGO_USER"),
+    password: required("MONGO_PASSWORD"),
+  },
+  authSource: mongoDatabase,
+});
+
+try {
   await mongo.connect();
-  const reviews = mongo.db(required("MONGO_DB")).collection("product_reviews");
+  const reviews = mongo.db(mongoDatabase).collection("product_reviews");
   await reviews.createIndex({ sku: 1, createdAt: -1 });
   await reviews.updateOne(
     { sampleId: "sample-st-001" },
