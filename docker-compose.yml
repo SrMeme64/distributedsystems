@@ -353,7 +353,7 @@ services:
   nagios:
     image: jasonrivers/nagios:latest
     ports:
-      - "8088:80"
+      - "127.0.0.1:8088:80"
     environment:
       NAGIOSADMIN_USER: nagiosadmin
       NAGIOSADMIN_PASS: ${NAGIOSADMIN_PASSWORD:?Set NAGIOSADMIN_PASSWORD in the Compose env file}

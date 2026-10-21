@@ -102,13 +102,20 @@ ejemplo `http://192.168.1.50/`, no usando `localhost`: en el segundo equipo,
     ```
 
     Si `TcpTestSucceeded` es `False`, comprueba que Docker sigue activo, que
-    ambos equipos están en la misma LAN y que el firewall del host permite TCP/80
-    en el perfil de red privada. Si es necesario, un administrador puede crear
-    una regla limitada a ese perfil:
+    ambos equipos están en la misma LAN y revisa el perfil de la interfaz con
+    `Get-NetConnectionProfile`. En una LAN privada de confianza, si hace falta,
+    un administrador puede permitir TCP/80 solo desde la IP del cliente. Cambia
+    la IP del ejemplo y usa el perfil activo:
 
     ```powershell
-    New-NetFirewallRule -DisplayName "Distributed Store HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Private
+    $clienteIp = "192.168.1.25"
+    New-NetFirewallRule -DisplayName "Distributed Store HTTP test" -Direction Inbound -Protocol TCP -LocalPort 80 -RemoteAddress $clienteIp -Action Allow -Profile Private
     ```
+
+    No abras TCP/80 a toda una red pública ni cambies el perfil de una Wi-Fi
+    pública solo para ejecutar la PoC. Si el perfil aparece como `Public`, usa
+    una red privada de confianza o define con el administrador una regla
+    restringida al cliente de prueba.
 
 4. Abre en el navegador del segundo equipo `http://192.168.1.50/`, usando la
     IP real del host. La API también se puede verificar desde ese equipo en
@@ -118,9 +125,8 @@ Conviene reservar la IP del host en el router o verificarla antes de cada
 sesión. El proyecto y Docker Compose se ejecutan en un solo host; el equipo
 cliente no necesita iniciar otra copia del stack. Las pruebas que detienen o
 inician contenedores se ejecutan en el host, mientras la carga y las
-comprobaciones HTTP se hacen desde el cliente. No publiques Nagios en redes no
-confiables; el puerto 8088 debe permanecer restringido al host o al equipo de
-administración.
+comprobaciones HTTP se hacen desde el cliente. Nagios está publicado únicamente
+en `127.0.0.1:8088` y no es accesible desde la LAN.
 
 El puerto 80 está publicado en `presentation-entry`, que reenvía las solicitudes
 a la VIP Docker `172.30.0.250`. Keepalived mueve esa VIP entre
@@ -129,6 +135,29 @@ la IP LAN puede probar el failover de esos balanceadores. La VIP no se publica
 directamente en la LAN. `presentation-entry` y el host Docker siguen siendo
 puntos únicos de falla; esta configuración no ofrece alta disponibilidad ante
 la caída del host.
+
+Para probar la conmutación sin reemplazar el namespace de red, pausa y reanuda
+el HAProxy desde otra terminal mientras se hacen solicitudes:
+
+```powershell
+docker compose --env-file .env.exam pause presentation-lb-master
+docker compose --env-file .env.exam unpause presentation-lb-master
+```
+
+El chequeo de Keepalived exige ahora una respuesta HTTP 200, de modo que
+también detecta un HAProxy pausado o que no responde a HTTP. Si se usa
+`docker compose stop` y luego `start` sobre un HAProxy, Docker puede recrear su
+namespace de red; en ese caso reinicia también su sidecar Keepalived para que
+se asocie al namespace activo:
+
+```powershell
+docker compose --env-file .env.exam start presentation-lb-master
+docker compose --env-file .env.exam restart presentation-keepalived-master
+```
+
+Para la capa de aplicación, sustituye `presentation-lb-master` y
+`presentation-keepalived-master` por `application-lb-master` y
+`application-keepalived-master`.
 
 ## Requisitos
 
