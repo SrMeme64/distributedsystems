@@ -104,18 +104,22 @@ ejemplo `http://192.168.1.50/`, no usando `localhost`: en el segundo equipo,
     Si `TcpTestSucceeded` es `False`, comprueba que Docker sigue activo, que
     ambos equipos están en la misma LAN y revisa el perfil de la interfaz con
     `Get-NetConnectionProfile`. En una LAN privada de confianza, si hace falta,
-    un administrador puede permitir TCP/80 solo desde la IP del cliente. Cambia
-    la IP del ejemplo y usa el perfil activo:
+    un administrador puede permitir TCP/80 solo entre las IP del host y del
+    cliente por la interfaz conectada. Cambia las direcciones y el nombre de
+    interfaz del ejemplo; no cambies el perfil de red solo para la PoC:
 
     ```powershell
+    $hostIp = "192.168.1.50"
     $clienteIp = "192.168.1.25"
-    New-NetFirewallRule -DisplayName "Distributed Store HTTP test" -Direction Inbound -Protocol TCP -LocalPort 80 -RemoteAddress $clienteIp -Action Allow -Profile Private
+    $interfaz = "Wi-Fi"
+    $perfil = (Get-NetConnectionProfile -InterfaceAlias $interfaz).NetworkCategory
+    New-NetFirewallRule -DisplayName "Distributed Store HTTP test" -Direction Inbound -Protocol TCP -LocalPort 80 -LocalAddress $hostIp -RemoteAddress $clienteIp -InterfaceAlias $interfaz -Action Allow -Profile $perfil
     ```
 
     No abras TCP/80 a toda una red pública ni cambies el perfil de una Wi-Fi
-    pública solo para ejecutar la PoC. Si el perfil aparece como `Public`, usa
-    una red privada de confianza o define con el administrador una regla
-    restringida al cliente de prueba.
+    pública solo para ejecutar la PoC. Si la interfaz aparece como `Public`,
+    usa esta regla únicamente en una LAN privada de confianza y mantenla
+    restringida a la IP del cliente.
 
 4. Abre en el navegador del segundo equipo `http://192.168.1.50/`, usando la
     IP real del host. La API también se puede verificar desde ese equipo en
@@ -214,6 +218,19 @@ alguno falla:
 ```powershell
 docker compose --env-file .env.exam logs --tail 100 catalog-init app1 app2 app3 galera1 galera2 galera3
 ```
+
+Si `galera1` se niega a iniciar porque `safe_to_bootstrap=0`, no borres los
+volúmenes ni fuerces el bootstrap: podrías perder transacciones. Respalda los
+tres volúmenes y recupera la posición con `wsrep-recover` en cada nodo; solo
+debe iniciar el nodo con la secuencia recuperada más alta. Después inicia los
+pares y confirma que los tres nodos estén saludables y sincronizados. Si las
+posiciones difieren o no puedes determinar el nodo más avanzado, detén la
+recuperación y conserva los respaldos.
+
+Keepalived corre en sidecars que comparten el namespace de red de cada HAProxy.
+Después de reconstruirlos o iniciarlos, confirma que los cuatro sidecars sigan
+activos en `docker compose ps`; un ciclo de reinicios indica que la VIP no está
+lista para las PoC.
 
 Direcciones desde el host Docker:
 

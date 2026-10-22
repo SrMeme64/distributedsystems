@@ -11,23 +11,25 @@ administrados.
 
 - [x] Levantar Compose en la laptop anfitriona con `.env.exam` y comprobar
   localmente salud, catálogo, reseñas y caché.
-- [ ] Ejecutar las PoC HTTP desde la segunda laptop usando la IP LAN del
-  anfitrión, no `localhost`; aún no se ha probado desde ese equipo.
-- [ ] Confirmar desde la segunda laptop si TCP/80 está permitido por el
-  firewall del host. La Wi-Fi del anfitrión usa perfil `Public` y no hay regla
-  entrante explícita para TCP/80; no abrir el acceso ampliamente. Si la prueba
-  se requiere, limitarlo a la IP/subred autorizada.
+- [x] Probar desde la segunda laptop usando la IP LAN del anfitrión:
+  `Test-NetConnection 192.168.1.69 -Port 80` tuvo éxito y
+  `/api/health` respondió HTTP 200 desde el cliente `192.168.1.68`.
+- [x] Permitir TCP/80 en el firewall solo desde `192.168.1.68`, hacia la IP
+  local `192.168.1.69` y por la interfaz Wi-Fi. Aunque Windows clasifica esa
+  interfaz como `Public`, no se abrió el puerto a otros equipos ni se cambió
+  el perfil de red.
 - [x] Restringir Nagios al host: Compose publica el puerto 8088 en
   `127.0.0.1`, no en las interfaces LAN.
-- [ ] Registrar IP del host, topología de red, herramienta, resultados y
-  evidencias de las pruebas desde el cliente.
+- [x] Registrar para la prueba básica host `192.168.1.69` por Wi-Fi, cliente
+  `192.168.1.68`, `Test-NetConnection` exitoso y `/api/health` HTTP 200.
 - [x] Probar desde el host el failover de los HAProxy de presentación a través
-  de `presentation-entry` y la VIP Docker `172.30.0.250`: al detener el master,
+  de `presentation-entry` y la VIP Docker `172.30.0.250`: al pausar el master,
   la API respondió HTTP 200 por el backup.
-- [ ] Repetir el failover desde el cliente LAN. En la prueba local, al iniciar
-  de nuevo el contenedor master no recuperó la VIP automáticamente; fue
-  necesario reiniciar `presentation-keepalived-master`. Registrar o resolver
-  esta recuperación antes de considerar completa la PoC.
+- [x] Verificar localmente failover y failback de las capas de presentación y
+  aplicación después de corregir el arranque de los sidecars Keepalived.
+- [x] Repetir failover y failback desde el cliente LAN `192.168.1.68` hacia el
+  host `192.168.1.69`: ambas trazas cambiaron al balanceador backup y luego
+  regresaron al master.
 - [x] Confirmar que `presentation-entry` y el host siguen siendo puntos únicos
   de falla; el failover de los HAProxy no protege ante su caída.
 
@@ -77,6 +79,10 @@ administrados.
   `10.20.0.168:8088` rechazó la conexión.
 - [x] Documentar cómo reiniciar el sidecar Keepalived después de `stop/start`
   manual de un HAProxy.
+- [x] Corregir el arranque de Keepalived: el Dockerfile limpiaba PID files en
+  rutas equivocadas. Los sidecars ahora eliminan los archivos bajo
+  `/run/keepalived/`; se reconstruyeron y los cuatro permanecieron activos sin
+  reinicios.
 - [ ] Añadir TLS en la entrada pública.
 - [ ] Añadir autenticación y límites de solicitudes a la API cuando corresponda.
 - [ ] Adoptar migraciones de base de datos.
@@ -127,16 +133,55 @@ administrados.
   otra laptop.
 - [x] Corregir el chequeo de Keepalived para exigir respuesta HTTP 200; las
   pruebas de failover confirmaron que detecta HAProxy pausados.
-- [ ] Pendiente: repetir pruebas desde la segunda laptop y registrar su IP,
-  conectividad LAN, reglas de firewall y evidencias. La ejecución local no
-  confirma acceso desde otro equipo.
+
+## Verificación ejecutada el 22-10-2026
+
+- [x] Investigar `curl.exe -i http://localhost/api/health` con `Empty reply`:
+  los servicios de datos y aplicación estaban detenidos y Keepalived no podía
+  mantener sus sidecars activos.
+- [x] Crear y validar respaldos comprimidos de los tres volúmenes Galera antes
+  de recuperar; se conservaron fuera del repositorio y no se eliminaron datos.
+- [x] Ejecutar `wsrep-recover` únicamente sobre copias temporales: los tres
+  nodos recuperaron el mismo UUID y posición `:30`. Se marcó `galera1` como
+  seguro para bootstrap; los nodos 2 y 3 se sincronizaron por transferencia de
+  estado.
+- [x] Confirmar Galera con `wsrep_cluster_size=3`,
+  `wsrep_cluster_status=Primary` y estado local `Synced`.
+- [x] Corregir las rutas de PID de Keepalived, reconstruir los cuatro
+  sidecars y comprobar que siguen activos con cero reinicios.
+- [x] Después de la recuperación, la página, `/api/health` y
+  `/api/products/cheapest` respondieron HTTP 200 localmente.
+- [x] Probar localmente la VIP de presentación: el backup atendió
+  `/api/health` con HTTP 200 al pausar el master; al reanudarlo, el master
+  recuperó el tráfico.
+- [x] Probar localmente la VIP de aplicación: el backup atendió
+  `/api/health` con HTTP 200 al pausar el master y el master recuperó el
+  tráfico al reanudarse.
+- [x] Desde la laptop cliente `192.168.1.68`, verificar
+  `Test-NetConnection 192.168.1.69 -Port 80` (`TcpTestSucceeded: True`) y
+  `GET http://192.168.1.69/api/health` (HTTP 200).
+- [x] Crear y verificar una regla de firewall limitada a TCP/80, cliente
+  `192.168.1.68`, dirección local `192.168.1.69` e interfaz `Wi-Fi`. La
+  solicitud HTTP se confirmó desde el segundo equipo.
+- [x] Ejecutar desde el cliente una secuencia de 60 consultas al health durante
+  el failover de presentación: la traza pasó de
+  `presentation-lb-master` a `presentation-lb-backup` y volvió al master.
+  Durante el cambio se observaron dos timeouts; una vez en backup, las
+  solicitudes respondieron HTTP 200.
+- [x] Repetir la secuencia durante el failover de aplicación: la traza pasó de
+  `application-lb-master` a `application-lb-backup` y volvió al master.
+  También se observaron dos timeouts durante la convergencia y HTTP 200 cuando
+  cada nodo quedó activo.
+- [x] Confirmar desde el host las respuestas HTTP 200 por los backups durante
+  cada pausa y el retorno de HTTP 200 al reanudar cada master.
 
 ## Orden de implementación sugerido
 
-1. Completar PoC desde la segunda laptop, incluyendo acceso LAN y failover;
-   restringir TCP/80 a su IP o subred autorizada.
-2. Automatizar respaldos periódicos de MariaDB y documentar monitoreo y
+1. Automatizar respaldos periódicos de MariaDB y documentar monitoreo y
    retención; ya se comprobó una restauración manual en una base temporal.
+2. Analizar y, si el alcance lo requiere, reducir los dos timeouts observados
+   durante cada failover LAN; el backup asumió tráfico y ambos masters
+   recuperaron el servicio.
 3. Incorporar observabilidad local y registrar resultados de rendimiento y
    disponibilidad en las PoC.
 4. Evaluar replica set de MongoDB o HA de Redis solo si el hardware disponible
