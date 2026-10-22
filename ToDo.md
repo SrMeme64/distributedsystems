@@ -30,6 +30,12 @@ administrados.
 - [x] Repetir failover y failback desde el cliente LAN `192.168.1.68` hacia el
   host `192.168.1.69`: ambas trazas cambiaron al balanceador backup y luego
   regresaron al master.
+- [x] Guardar scripts reutilizables y evidencia de esta corrida en
+  [poc/2026-10-22-lan-failover](./poc/2026-10-22-lan-failover/README.md),
+  separados de futuras PoC.
+- [x] Validar sintaxis de los scripts PowerShell; el monitor devolvió HTTP 200,
+  el failover se revisó con `-WhatIf`, y las operaciones de firewall se
+  comprobaron con `-WhatIf`/verificación de alcance sin quitar la regla activa.
 - [x] Confirmar que `presentation-entry` y el host siguen siendo puntos únicos
   de falla; el failover de los HAProxy no protege ante su caída.
 

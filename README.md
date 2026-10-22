@@ -132,6 +132,12 @@ inician contenedores se ejecutan en el host, mientras la carga y las
 comprobaciones HTTP se hacen desde el cliente. Nagios está publicado únicamente
 en `127.0.0.1:8088` y no es accesible desde la LAN.
 
+La PoC LAN realizada el 22-10-2026, con resultados, scripts reutilizables de
+monitorización/failover y gestión restringida de firewall, está en
+[poc/2026-10-22-lan-failover](./poc/2026-10-22-lan-failover/README.md). Sus
+resultados corresponden a esa ejecución; repite las comprobaciones antes de
+asumir que las IP o el perfil de red siguen iguales.
+
 El puerto 80 está publicado en `presentation-entry`, que reenvía las solicitudes
 a la VIP Docker `172.30.0.250`. Keepalived mueve esa VIP entre
 `presentation-lb-master` y `presentation-lb-backup`, por lo que el acceso desde
