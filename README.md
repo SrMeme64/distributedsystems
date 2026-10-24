@@ -253,7 +253,7 @@ curl.exe -i "$baseUrl/api/health"
 - Con `app1` detenido: 3 solicitudes `HTTP 200`, trazas `app3`, `app2`, `app3`.
 - Tras recuperar `app1`: `HTTP 200`, traza `app1`.
 
-## PoC 3: Chaos Engineering (opcional)
+## PoC 3: Chaos Engineering 
 
 
 Inyecta una falla controlada en una réplica API y comprueba que el servicio mantiene disponibilidad:
