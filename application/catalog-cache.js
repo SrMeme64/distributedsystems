@@ -48,3 +48,45 @@ export const getCachedOrLoad = async ({ redis, cacheKey, ttlSeconds, load }) => 
     }
   }
 };
+
+/**
+ * Reads the catalog through the cache. If Redis is unavailable the catalog is
+ * served directly from MariaDB: the cache is disposable and must never turn a
+ * database read into an API failure. Errors raised by `load` itself are
+ * propagated so a database outage is not mistaken for a cache outage.
+ */
+export const getCatalog = async ({ redis, cacheKey, ttlSeconds, load, onCacheError }) => {
+  let loadError;
+  let loadedValue;
+  let loadCompleted = false;
+
+  const loadOnce = async () => {
+    try {
+      loadedValue = await load();
+      loadCompleted = true;
+      return loadedValue;
+    } catch (error) {
+      loadError = error;
+      throw error;
+    }
+  };
+
+  try {
+    const result = await getCachedOrLoad({
+      redis,
+      cacheKey,
+      ttlSeconds,
+      load: loadOnce,
+    });
+    return { ...result, cacheAvailable: true };
+  } catch (error) {
+    if (loadError) {
+      throw loadError;
+    }
+    onCacheError?.(error);
+    // If the database read already succeeded and only the cache write failed,
+    // reuse that result instead of querying MariaDB a second time.
+    const value = loadCompleted ? loadedValue : await load();
+    return { value, cacheHit: false, cacheAvailable: false };
+  }
+};

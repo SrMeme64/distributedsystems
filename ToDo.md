@@ -41,12 +41,20 @@ administrados.
 
 ## 2. Reducir dependencias de datos de instancia única
 
-- [ ] Evaluar un replica set local para MongoDB si los recursos del host lo
-  permiten; documentar que no protege contra la caída del host.
-- [ ] Evaluar alta disponibilidad local para Redis solo si las PoC requieren
-  conservar la caché ante la caída de un contenedor.
-- [x] Definir Redis como caché descartable: los datos se pueden reconstruir
-  desde MariaDB.
+- [x] Implementar un replica set local de MongoDB (`rs0`) con tres nodos,
+  keyfile compartido y usuario de aplicación limitado; documentar que no
+  protege contra la caída del host.
+- [x] Implementar alta disponibilidad local para Redis con un maestro, dos
+  réplicas y tres centinelas (quórum 2).
+- [x] Definir Redis como caché descartable: sin AOF ni RDB, los datos se
+  reconstruyen desde MariaDB.
+- [x] Eliminar la conexión directa de la API a `galera1`: la API usa
+  `DB_HOST=proxysql` y ProxySQL descubre al writer.
+- [x] Enrutar lecturas y escrituras en Galera: `SELECT ... FOR UPDATE` y las
+  escrituras al hostgroup 10; los `SELECT` simples al hostgroup 30.
+- [x] Revisar los límites del pool al escalar réplicas: `DB_POOL_SIZE` por API,
+  `3 × DB_POOL_SIZE` conexiones totales, límites de ProxySQL y MariaDB
+  documentados en el README.
 - [ ] Añadir monitoreo y una política de respaldos periódicos para MariaDB.
 - [ ] Probar regularmente los procedimientos de restauración.
 
@@ -181,6 +189,52 @@ administrados.
 - [x] Confirmar desde el host las respuestas HTTP 200 por los backups durante
   cada pausa y el retorno de HTTP 200 al reanudar cada master.
 
+## Verificación ejecutada el 23-10-2026
+
+- [x] `docker compose --env-file .env.exam config --quiet` finalizó sin errores.
+- [x] El stack levantó con ProxySQL, `rs0` y Redis Sentinel; `db-bootstrap`,
+  `mongo-init` y `catalog-init` terminaron con código 0.
+- [x] `/api/health` respondió 200 con `mariadb`, `mongodb` y `redis` en `ok`;
+  catálogo y reseñas respondieron 200.
+- [x] `rs0` quedó con `mongo1` primario y `mongo2`/`mongo3` secundarios.
+- [x] Sentinel reportó `mymaster` y dos réplicas.
+- [x] ProxySQL enrutó los `SELECT` al hostgroup 30 y el DDL/INSERT al hostgroup
+  10.
+- [x] Failover de writer Galera: al detener `galera3`, ProxySQL promovió
+  `galera2`; una escritura de prueba insertó 1 fila y el catálogo siguió en 200.
+  Al reiniciar, `galera3` volvió como writer y el clúster quedó
+  `wsrep_cluster_size=3`, `Synced`, `Primary`.
+- [x] Failover de MongoDB: al detener `mongo1`, `mongo2` fue elegido primario;
+  `GET` de reseñas respondió 200 y `POST` respondió 201. Al reiniciar, `mongo1`
+  volvió como primario.
+- [x] Failover de Redis: al detener el maestro actual, Sentinel promovió una
+  réplica; `/api/health` respondió 200 y el catálogo 200 con
+  `redis (unavailable) -> mariadb`; al reiniciar, el nodo volvió como réplica.
+- [x] Caída total de Redis: `/api/health` respondió 200 `degraded` y el catálogo
+  200 desde MariaDB; `POST /api/cache/clear` respondió 503. Tras reiniciar los
+  seis contenedores, la salud volvió a `ok`.
+- [x] Corregir el `TILT` de Sentinel: Docker elimina el DNS de un contenedor
+  detenido y Sentinel no podía resolver `redis-master`; los centinelas
+  monitorean la IP fija `172.32.0.11`.
+- [x] Añadir `REDIS_COMMAND_TIMEOUT_MS` para que una caché que no responde no
+  bloquee el catálogo; las lecturas degradan a MariaDB.
+- [x] Ampliar el chequeo de HAProxy a `timeout check 4s` y acortar los chequeos
+  de salud para que un fallo de Redis no marque los tres backends API como
+  caídos.
+- [x] Confirmar que `docker compose up -d` devuelve código 0; el código 1
+  observado antes era un artefacto de las tuberías de PowerShell, no un fallo de
+  Compose.
+- [x] Retirar los contenedores huérfanos de intentos previos con
+  `--remove-orphans`.
+- [x] Recuperar `galera1` tras detenerlo solo: `galera/entrypoint.sh` detecta
+  datos con `safe_to_bootstrap=0` y se une al clúster en lugar de intentar un
+  bootstrap inseguro.
+- [x] Ampliar los reintentos de `db-bootstrap` a `EAI_AGAIN`/`ENOTFOUND` y
+  ciclar `galera1,galera2,galera3`; con `galera1` detenido, el bootstrap creó el
+  usuario de monitoreo en `galera2`.
+- [x] Verificar que la API arranca con MongoDB no disponible y se recupera sin
+  reiniciar cuando el replica set vuelve.
+
 ## Orden de implementación sugerido
 
 1. Automatizar respaldos periódicos de MariaDB y documentar monitoreo y
@@ -190,7 +244,7 @@ administrados.
    recuperaron el servicio.
 3. Incorporar observabilidad local y registrar resultados de rendimiento y
    disponibilidad en las PoC.
-4. Evaluar replica set de MongoDB o HA de Redis solo si el hardware disponible
-   lo soporta; esto no resolvería la caída del host.
+4. Automatizar las pruebas de failover de ProxySQL, MongoDB y Redis para que
+   puedan repetirse con un script y comparar tiempos de detección y recuperación.
 5. Dejar orquestación multinodo y failover entre hosts como evolución futura,
    sujeta a disponer de más hosts o infraestructura adicional.

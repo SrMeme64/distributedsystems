@@ -14,8 +14,8 @@ aplicación, almacenamiento relacional y NoSQL, y una caché para el catálogo.
 
 La infraestructura se ejecuta con Docker Compose en un solo host. Incluye dos
 pares HAProxy master/backup con Keepalived, tres nodos web Nginx, tres nodos API
-Node.js, tres nodos MariaDB Galera, una instancia MongoDB y una instancia
-Redis.
+Node.js, tres nodos MariaDB Galera detrás de ProxySQL, un replica set MongoDB de
+tres nodos y Redis con un maestro, dos réplicas y tres centinelas.
 
 ### Diagrama JPG
 
@@ -40,17 +40,17 @@ flowchart LR
         haprA --> api
     end
     subgraph datos["Datos"]
-        galera1["MariaDB Galera<br/>galera1"]
-        galeraRest["Nodos Galera<br/>galera2 · galera3"]
-        mongo[(MongoDB<br/>reseñas)]
-        redis[(Redis<br/>caché de catálogo)]
-        galera1 <--> galeraRest
+        proxy["ProxySQL<br/>writer 10 · reader 30"]
+        galera["MariaDB Galera<br/>galera1 · galera2 · galera3"]
+        mongo[("MongoDB replica set rs0<br/>mongo1 · mongo2 · mongo3")]
+        redis[("Redis Sentinel<br/>maestro + 2 réplicas<br/>3 centinelas")]
+        proxy --- galera
     end
     cliente --> entry --> haprP
     web --> haprA
-    api -->|"conexión actual directa"| galera1
-    api --> mongo
-    api --> redis
+    api -->|"escrituras y lecturas :6033"| proxy
+    api -->|"reseñas"| mongo
+    api -->|"caché"| redis
 ```
 
 ### Responsabilidad de las capas
@@ -59,18 +59,106 @@ flowchart LR
   `web3`. Keepalived administra una VIP entre los HAProxy.
 - **Aplicación:** HAProxy distribuye las solicitudes entre `app1`, `app2` y
   `app3`. La API ofrece catálogo, reseñas y estado de salud.
-- **Datos:** MariaDB Galera almacena el catálogo; MongoDB almacena las reseñas;
-  Redis conserva la respuesta de productos más baratos durante el TTL
-  configurado en `CATALOG_CACHE_TTL_SECONDS` (60 segundos por defecto).
+- **Datos:** MariaDB Galera almacena el catálogo y ProxySQL enruta las
+  escrituras al nodo writer y las lecturas a los nodos reader. MongoDB replica
+  set almacena las reseñas. Redis conserva la respuesta de productos más baratos
+  durante el TTL configurado en `CATALOG_CACHE_TTL_SECONDS` (60 segundos por
+  defecto); si Redis no está disponible, el catálogo se sirve desde MariaDB.
 
-### Alcance actual
+### Alcance y límites
 
-Los tres nodos MariaDB forman un clúster Galera, pero actualmente la API y el
-inicializador se conectan directamente a `galera1`. Tener replicación Galera
-no hace que el cliente distribuya sus conexiones: si `galera1` falla, la
-aplicación no cambia automáticamente a `galera2` o `galera3`. MongoDB y Redis
-son instancias únicas. Además, todo Compose se ejecuta en un solo host; esta
-demostración no ofrece alta disponibilidad ante la caída de ese host.
+La API ya no se conecta a `galera1`: usa `DB_HOST=proxysql`, por lo que
+ProxySQL decide qué nodo Galera atiende cada consulta y promueve otro writer si
+el actual falla. MongoDB dejó de ser una instancia única: `rs0` mantiene tres
+nodos con un primario elegido automáticamente. Redis tiene un maestro, dos
+réplicas y tres centinelas; la caché sigue siendo descartable y el catálogo
+puede servirse desde MariaDB.
+
+Todo Compose se ejecuta en un solo host. Esta demostración **no** ofrece alta
+disponibilidad ante la caída del host, de Docker Desktop, de
+`presentation-entry` ni de la red local. El objetivo es tolerar la caída de
+réplicas y procesos dentro del mismo host, no sustituir una plataforma
+multinodo.
+
+### Capa de datos y alta disponibilidad
+
+#### ProxySQL para MariaDB
+
+La API y `catalog-init` se conectan a `proxysql:6033`. ProxySQL monitorea el
+estado `wsrep` de los tres nodos y los clasifica en grupos:
+
+| Grupo | Uso | Contenido |
+|---|---|---|
+| `10` | Writer | Un solo nodo `Synced` y `Primary` |
+| `20` | Backup writer | Candidatos a writer |
+| `30` | Reader | Nodos sincronizados para lecturas |
+| `40` | Offline | Nodos no disponibles |
+
+Las reglas de consulta envían `SELECT ... FOR UPDATE` y las escrituras al grupo
+`10`, y los `SELECT` simples al grupo `30`. Si el writer falla, ProxySQL
+promueve otro nodo sin cambiar la configuración de la API. El usuario
+`proxysql_monitor` se crea durante el bootstrap con permisos mínimos (`USAGE`,
+`PROCESS`, `REPLICATION CLIENT`) y no se usa para las consultas de la tienda.
+
+El panel de administración de ProxySQL escucha solo en la red interna, en
+`proxysql:6032`. Para consultarlo desde el host:
+
+```powershell
+docker exec -it distributed-three-tier-proxysql-1 `
+  mysql -u admin -pchange-this-proxysql-admin-password -h 127.0.0.1 -P6032
+```
+
+#### MongoDB replica set
+
+`rs0` tiene tres miembros: `mongo1` (prioridad 2), `mongo2` y `mongo3`
+(prioridad 1). Los nodos comparten un keyfile para autenticación interna y
+`catalog-init` crea el usuario de aplicación `store_app` limitado a
+`store_reviews`. La API usa `MONGO_HOSTS=mongo1,mongo2,mongo3` y
+`MONGO_REPLICA_SET=rs0`; el driver descubre al primario y tolera la caída de un
+nodo. Si el primario se detiene, se elige otro y las reseñas siguen
+respondiendo. La API no bloquea el arranque si el replica set todavía no tiene
+primario: la conexión se intenta en segundo plano y, si el intento falla, el
+cliente se reemplaza para que una petición posterior pueda reconectar cuando
+MongoDB vuelva. `/api/health` marca `mongodb: unavailable` mientras tanto y las
+reseñas responden `503`, sin afectar el catálogo.
+
+#### Redis Sentinel y caché descartable
+
+Redis tiene un maestro, dos réplicas y tres centinelas con quórum 2. La API se
+conecta a `redis-sentinel1/2/3:26379` y descubre al maestro con el nombre
+`mymaster`; si el maestro cae, Sentinel promueve una réplica. Redis no usa AOF
+ni RDB: es una caché descartable y el catálogo se reconstruye desde MariaDB.
+Los centinelas monitorean la IP fija `172.32.0.11` en lugar del nombre
+`redis-master`, porque Docker elimina el DNS de un contenedor detenido y
+Sentinel entra en `TILT` cuando no puede resolver el nombre, lo que bloquea el
+failover.
+
+La API aplica `REDIS_COMMAND_TIMEOUT_MS` (2 segundos por defecto) a cada comando
+de caché. Si Redis no responde, el catálogo se lee de MariaDB en lugar de
+quedarse esperando. `POST /api/cache/clear` sigue devolviendo `503` cuando Redis
+no está disponible: la lectura degrada, pero la administración explícita de la
+caché requiere Redis.
+
+#### Dimensionamiento del pool de conexiones
+
+`DB_POOL_SIZE` es el límite de conexiones **por réplica de API**. Con tres
+réplicas, el máximo simultáneo es `3 × DB_POOL_SIZE` conexiones de aplicación,
+además de las conexiones de monitoreo de ProxySQL. Los valores del proyecto
+mantienen ese total por debajo de los límites de ProxySQL y MariaDB:
+
+| Variable | Valor por defecto | Efecto |
+|---|---|---|
+| `DB_POOL_SIZE` | 10 | Conexiones por réplica de API |
+| `DB_POOL_IDLE_TIMEOUT_MS` | 60000 | Cierre de conexiones inactivas |
+| `DB_CONNECT_TIMEOUT_MS` | 5000 | Límite para abrir una conexión |
+| `REDIS_COMMAND_TIMEOUT_MS` | 2000 | Límite por comando de caché |
+| `CATALOG_CACHE_TTL_SECONDS` | 60 | TTL del catálogo |
+
+ProxySQL limita el usuario de aplicación a `max_connections=200` y cada servidor
+Galera a `max_connections=30`. Al escalar réplicas de API hay que comprobar que
+`N × DB_POOL_SIZE` siga por debajo de esos límites y de `max_connections` de
+MariaDB; si se aumenta el pool, hay que subir también los límites de ProxySQL y
+Galera de forma coordinada.
 
 ### Acceso desde el segundo equipo
 
@@ -204,6 +292,11 @@ MONGO_ROOT_PASSWORD=change-this-mongodb-password
 MONGO_APP_USERNAME=store_app
 MONGO_APP_PASSWORD=change-this-mongodb-app-password
 CATALOG_CACHE_TTL_SECONDS=60
+REDIS_COMMAND_TIMEOUT_MS=2000
+PROXYSQL_ADMIN_PASSWORD=change-this-proxysql-admin-password
+PROXYSQL_MONITOR_USER=proxysql_monitor
+PROXYSQL_MONITOR_PASSWORD=change-this-proxysql-monitor-password
+DB_POOL_SIZE=10
 NAGIOSADMIN_PASSWORD=change-this-nagios-password
 ```
 
@@ -222,16 +315,24 @@ se inicializa. Confirma que los servicios estén iniciados y revisa los logs si
 alguno falla:
 
 ```powershell
-docker compose --env-file .env.exam logs --tail 100 catalog-init app1 app2 app3 galera1 galera2 galera3
+docker compose --env-file .env.exam logs --tail 100 catalog-init db-bootstrap mongo-init proxysql app1 app2 app3 galera1 galera2 galera3 mongo1 mongo2 mongo3 redis-master redis-sentinel1
 ```
 
-Si `galera1` se niega a iniciar porque `safe_to_bootstrap=0`, no borres los
-volúmenes ni fuerces el bootstrap: podrías perder transacciones. Respalda los
-tres volúmenes y recupera la posición con `wsrep-recover` en cada nodo; solo
-debe iniciar el nodo con la secuencia recuperada más alta. Después inicia los
-pares y confirma que los tres nodos estén saludables y sincronizados. Si las
-posiciones difieren o no puedes determinar el nodo más avanzado, detén la
-recuperación y conserva los respaldos.
+`galera1` usa `galera/entrypoint.sh` para decidir si arranca el clúster o se
+une a uno existente. Si hay datos y `safe_to_bootstrap=0` (por ejemplo, porque
+solo se detuvo `galera1` mientras `galera2` y `galera3` seguían activos), el
+nodo se une al clúster en lugar de negarse a arrancar. Solo hace bootstrap
+cuando no hay datos o cuando el nodo fue el último en salir del componente
+primario.
+
+Si todos los nodos están detenidos y ninguno tiene `safe_to_bootstrap=1`,
+`mysqld` se niega a hacer bootstrap para no perder transacciones. En ese caso no
+borres los volúmenes ni fuerces el bootstrap: respalda los tres volúmenes y
+recupera la posición con `wsrep-recover` en cada nodo; solo debe iniciar el nodo
+con la secuencia recuperada más alta. Después inicia los pares y confirma que
+los tres nodos estén saludables y sincronizados. Si las posiciones difieren o
+no puedes determinar el nodo más avanzado, detén la recuperación y conserva los
+respaldos.
 
 Keepalived corre en sidecars que comparten el namespace de red de cada HAProxy.
 Después de reconstruirlos o iniciarlos, confirma que los cuatro sidecars sigan
@@ -250,14 +351,24 @@ Desde el otro equipo, sustituye `localhost` por la IP LAN del host, por
 ejemplo `http://192.168.1.50/` y `http://192.168.1.50/api/health`.
 
 La tienda muestra la ruta de las solicitudes. El encabezado `X-Request-Trace`
-identifica los balanceadores, nodos y almacenes involucrados. El endpoint
-`POST /api/cache/clear` elimina la entrada de caché del catálogo.
-La API se conecta a MongoDB con un usuario limitado a lectura y escritura en la
-base `store_reviews`; `catalog-init` usa la cuenta administrativa solo para
-crear o actualizar ese usuario durante la inicialización. La duración de la
-caché del catálogo se configura con `CATALOG_CACHE_TTL_SECONDS` (60 segundos
-por defecto). Las peticiones simultáneas a una caché vacía comparten una sola
-carga desde MariaDB.
+identifica los balanceadores, nodos y almacenes involucrados; `mariadb` indica
+una consulta a través de ProxySQL y `redis (unavailable)` indica que el catálogo
+se sirvió desde MariaDB porque la caché no respondió. El endpoint
+`POST /api/cache/clear` elimina la entrada de caché del catálogo y devuelve
+`503` si Redis no está disponible.
+
+`GET /api/health` devuelve `200` con estado `ok` cuando MariaDB, MongoDB y Redis
+responden. Si falla MongoDB o Redis, mantiene `200` y marca `degraded`, porque
+las reseñas o la caché no bloquean el catálogo. Solo devuelve `503` cuando
+MariaDB no responde, ya que en ese caso la API no puede atender el catálogo.
+
+La API se conecta a MariaDB por `proxysql:6033`, no a un nodo Galera concreto.
+Se conecta a MongoDB con un usuario limitado a lectura y escritura en la base
+`store_reviews`; `catalog-init` usa la cuenta administrativa solo para crear o
+actualizar ese usuario durante la inicialización. La duración de la caché del
+catálogo se configura con `CATALOG_CACHE_TTL_SECONDS` (60 segundos por defecto).
+Las peticiones simultáneas a una caché vacía comparten una sola carga desde
+MariaDB.
 
 Para detener los contenedores sin borrar los datos persistidos:
 
@@ -266,8 +377,9 @@ docker compose --env-file .env.exam down
 ```
 
 Para borrar también los volúmenes de MariaDB y MongoDB y reiniciar los datos
-desde cero, usa `docker compose --env-file .env.exam down -v`. Esta operación
-es destructiva.
+desde cero, usa `docker compose --env-file .env.exam down -v`. Esta operación es
+destructiva. Redis no tiene volúmenes de persistencia: al recrear sus
+contenedores la caché arranca vacía y se reconstruye desde MariaDB.
 
 ## PoC 1: Prueba de carga
 
@@ -301,13 +413,17 @@ y un listener de resumen. No aumentes la carga sin vigilar CPU, memoria y logs.
 
 **Registrar en el informe:** herramienta y versión, fecha, concurrencia,
 solicitudes completadas, solicitudes fallidas, tiempo medio, percentiles y
-solicitudes por segundo. No se incluyen resultados hasta que el equipo ejecute
-la prueba en su entorno.
+solicitudes por segundo.
 
-**Espacio para resultados:**
+### Resultados de la ejecución del 23-10-2026
 
-> Pendiente: agregar tabla, captura de ApacheBench/JMeter y análisis de los
-> resultados obtenidos por el equipo.
+| Escenario | Solicitudes | Fallidas | Req/s | Tiempo medio | Observaciones |
+|---|---|---|---|---|---|
+| Caché fría (`-n 1 -c 1`) | 1 | 0 | 107.60 | 9.294 ms | Primera carga desde MariaDB, escritura en caché. |
+| Caché caliente (`-n 500 -c 20`) | 500 | 0 | 1447.22 | 13.820 ms | Cache hit en todas las solicitudes; sin errores. |
+
+Herramienta: ApacheBench (httpd:alpine) desde un contenedor en la red `edge`,
+endpoint `GET /api/products/cheapest`, host Docker en `presentation-entry`.
 
 ## PoC 2: Failover simple
 
@@ -354,7 +470,120 @@ se puede iniciar de nuevo. Guarda los encabezados y las horas de cada paso.
 Esta PoC prueba la tolerancia a la caída de una réplica API, no la alta
 disponibilidad del host ni el failover del puerto 80 publicado por Docker.
 
-## PoC 3: Chaos Engineering con Chaos Monkey
+### Resultados de la ejecución del 23-10-2026
+
+- Baseline: `HTTP 200`, traza `app2`.
+- Con `app1` detenido: 3 solicitudes consecutivas respondieron `HTTP 200`,
+  trazas `app3`, `app2` y `app3`; HAProxy retiró `app1` del balanceo.
+- Tras recuperar `app1`: `HTTP 200`, traza `app1`.
+
+## PoC 3: Failover de la capa de datos
+
+**Objetivo:** comprobar que la API sigue atendiendo cuando falla el writer de
+Galera, el primario de MongoDB o el maestro de Redis. Ejecuta cada prueba con el
+stack levantado y restaura el servicio al final.
+
+### Galera writer
+
+1. Consulta el writer actual:
+
+   ```powershell
+   docker exec distributed-three-tier-proxysql-1 mysql -u admin -pchange-this-proxysql-admin-password -h 127.0.0.1 -P6032 -e "SELECT hostgroup, srv_host, status FROM stats_mysql_connection_pool WHERE hostgroup=10;"
+   ```
+
+2. Detén el writer (por ejemplo `galera3`), espera 10 segundos y comprueba que
+   ProxySQL promueve otro nodo y que una escritura funciona:
+
+   ```powershell
+   docker compose --env-file .env.exam stop galera3
+   Start-Sleep -Seconds 10
+   docker exec distributed-three-tier-proxysql-1 mysql -u store_app -pchange-this-catalog-password -h 127.0.0.1 -P6033 -D store -e "CREATE TABLE IF NOT EXISTS failover_probe (id INT); INSERT INTO failover_probe VALUES (1); SELECT COUNT(*) FROM failover_probe; DROP TABLE failover_probe;"
+   curl.exe -i http://localhost/api/health
+   docker compose --env-file .env.exam start galera3
+   ```
+
+3. Espera a que `galera3` vuelva a `Synced` y confirma `wsrep_cluster_size=3`.
+
+### MongoDB primary
+
+1. Identifica el primario:
+
+   ```powershell
+   docker exec distributed-three-tier-mongo1-1 mongosh --quiet --username store_admin --password change-this-mongodb-password --authenticationDatabase admin --eval "rs.status().members.map(m => m.name + '=' + m.stateStr).join(',')"
+   ```
+
+2. Detén el primario, espera la elección y prueba lectura y escritura de
+   reseñas:
+
+   ```powershell
+   docker compose --env-file .env.exam stop mongo1
+   Start-Sleep -Seconds 18
+   curl.exe -i http://localhost/api/products/ST-001/reviews
+   $body = '{"reviewer":"failover-probe","rating":5,"comment":"mongo failover probe"}'
+   Set-Content -Path "$env:TEMP\review.json" -Value $body -Encoding ascii
+   curl.exe -i -X POST -H "Content-Type: application/json" --data-binary "@$env:TEMP\review.json" http://localhost/api/products/ST-001/reviews
+   docker compose --env-file .env.exam start mongo1
+   ```
+
+3. Confirma que `rs0` tiene un primario y dos secundarios.
+
+### Redis master
+
+1. Consulta el maestro:
+
+   ```powershell
+   docker exec distributed-three-tier-redis-sentinel1-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+   ```
+
+2. Detén el contenedor que actúa como maestro (puede ser `redis-master`,
+   `redis-replica1` o `redis-replica2` según el último failover), espera 20
+   segundos y comprueba la promoción y la degradación. Sustituye
+   `redis-master` por el servicio que corresponda a la IP devuelta en el paso
+   anterior:
+
+   ```powershell
+   docker compose --env-file .env.exam stop redis-master
+   Start-Sleep -Seconds 20
+   docker exec distributed-three-tier-redis-sentinel1-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+   curl.exe -i http://localhost/api/health
+   curl.exe -i http://localhost/api/products/cheapest
+   docker compose --env-file .env.exam start redis-master
+   ```
+
+3. La salud debe responder `200` con `redis: unavailable` mientras dure la
+   caída y el catálogo debe mostrar `redis (unavailable) -> mariadb`. Al
+   reiniciar, Redis debe volver como réplica del maestro promovido.
+
+### Caída total de Redis
+
+1. Detén todos los contenedores Redis:
+
+   ```powershell
+   docker compose --env-file .env.exam stop redis-master redis-replica1 redis-replica2 redis-sentinel1 redis-sentinel2 redis-sentinel3
+   ```
+
+2. Comprueba que `/api/health` responde `200 degraded` y que el catálogo
+   responde `200`; `POST /api/cache/clear` debe devolver `503`.
+
+3. Reinicia los seis contenedores y espera a que la salud vuelva a `ok`:
+
+   ```powershell
+   docker compose --env-file .env.exam start redis-master redis-replica1 redis-replica2 redis-sentinel1 redis-sentinel2 redis-sentinel3
+   ```
+
+### Resultados de la ejecución del 23-10-2026
+
+| Falla | Resultado observado |
+|---|---|
+| Writer Galera `galera3` detenido | ProxySQL promovió `galera2`; la escritura de prueba insertó 1 fila y el catálogo siguió en 200. Al reiniciar, `galera3` recuperó el writer y el clúster quedó `size=3`, `Synced`, `Primary`. |
+| Primario MongoDB `mongo1` detenido | `mongo2` fue elegido primario; `GET /api/products/ST-001/reviews` respondió 200 y `POST` respondió 201. Al reiniciar, `mongo1` volvió como primario. |
+| Maestro Redis `redis-replica1` detenido | Sentinel promovió `172.32.0.11`; `/api/health` respondió 200 y el catálogo 200 con traza `redis (unavailable) -> mariadb`; `POST /api/cache/clear` respondió 503. |
+| Todos los Redis detenidos | `/api/health` respondió 200 `degraded` (`redis: unavailable`); el catálogo respondió 200 desde MariaDB. Tras reiniciar, la salud volvió a `ok` y el catálogo registró `cache miss` y escritura en caché. |
+| `app1` detenido | HAProxy retiró el nodo; `/api/health` siguió en 200 por `app2`/`app3` (PoC 2). |
+| `galera1` detenido y reiniciado solo | `galera/entrypoint.sh` detectó datos con `safe_to_bootstrap=0` y lo unió al clúster activo; `wsrep_cluster_size` volvió a 3 sin forzar un bootstrap inseguro. |
+| MongoDB caído al arrancar `app1` | `app1` arrancó en estado `degraded` y las reseñas respondieron 503. Al volver `rs0` con un primario, `/api/health` pasó a `ok` y las reseñas a 200 sin reiniciar la API. |
+
+## PoC 4: Chaos Engineering con Chaos Monkey
 
 **Objetivo:** inyectar desde el host una falla controlada en una réplica API y
 comprobar desde el equipo cliente la hipótesis de que el servicio mantiene
@@ -386,9 +615,12 @@ finally {
 ```
 
 **Límites y seguridad:** realiza esta prueba solo en el entorno local, nunca en
-una instalación compartida o productiva. No detengas Galera, MongoDB, Redis ni
-los balanceadores en este experimento inicial. Si una solicitud falla,
-registra el resultado y verifica la recuperación con
+una instalación compartida o productiva. El experimento inicial se limita a una
+réplica API; los grupos `galera`, `mongodb`, `redis` y `proxysql` ya tienen
+procedimientos de failover documentados en la PoC 3 y en
+[resilience-lab](./resilience-lab/README.md), pero deben usarse de forma
+controlada y con la restauración verificada. Si una solicitud falla, registra el
+resultado y verifica la recuperación con
 `docker compose --env-file .env.exam ps` en el host y
 `curl.exe -i http://192.168.1.50/api/health`
 desde el cliente (sustituye la IP por la del host Docker).
@@ -396,13 +628,17 @@ desde el cliente (sustituye la IP por la del host Docker).
 **Espacio para resultados:**
 
 > Pendiente: documentar hipótesis, nodo afectado, duración, errores observados,
-> evidencia de recuperación y conclusiones del equipo. Para usar Netflix Chaos
-> Monkey real, se requiere migrar/desplegar la infraestructura en una plataforma
-> compatible con Spinnaker y documentar esa configuración por separado.
+> evidencia de recuperación y conclusiones del equipo para las corridas de Chaos
+> Monkey. Los resultados de failover de la capa de datos del 23-10-2026 están en
+> la PoC 3. Para usar Netflix Chaos Monkey real, se requiere migrar/desplegar la
+> infraestructura en una plataforma compatible con Spinnaker y documentar esa
+> configuración por separado.
 
 ## Documentación y evidencias
 
 Este README y los archivos Markdown del repositorio constituyen la
-documentación del proyecto. El equipo debe completar los espacios pendientes
-con el diagrama JPG exportado y las evidencias reales de las PoC antes de
-presentar resultados como ejecutados.
+documentación del proyecto. La capa de datos, los modos de falla y los resultados
+del 23-10-2026 están descritos en las secciones anteriores. El equipo debe
+completar los espacios pendientes con el diagrama JPG exportado y las evidencias
+reales de las PoC de carga y Chaos Monkey antes de presentar esos resultados como
+ejecutados.

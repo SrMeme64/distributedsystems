@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { MongoClient } from "mongodb";
 import mysql from "mysql2/promise";
+import { buildMongoUri } from "./mongo-config.js";
 
 const required = (name) => {
   const value = process.env[name];
@@ -22,7 +23,12 @@ const connectToMariaDb = async () => {
         multipleStatements: true,
       });
     } catch (error) {
-      if (!["ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH"].includes(error.code) || attempt === 30) {
+      if (
+        !["ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "EAI_AGAIN", "ENOTFOUND"].includes(
+          error.code,
+        ) ||
+        attempt === 30
+      ) {
         throw error;
       }
       console.log(`MariaDB is not ready; retrying (${attempt}/30)`);
@@ -33,10 +39,8 @@ const connectToMariaDb = async () => {
 };
 
 const connection = await connectToMariaDb();
-const mongoHost = required("MONGO_HOST");
-const mongoPort = Number(process.env.MONGO_PORT || 27017);
 const mongoDatabase = required("MONGO_DB");
-const mongoAddress = `mongodb://${mongoHost}:${mongoPort}/${encodeURIComponent(mongoDatabase)}`;
+const mongoAddress = buildMongoUri();
 const mongoAdmin = new MongoClient(
   mongoAddress,
   {

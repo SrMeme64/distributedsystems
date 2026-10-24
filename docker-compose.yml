@@ -183,19 +183,21 @@ services:
   app1:
     build: ./application
     environment: &application-environment
-      DB_HOST: galera1
-      DB_PORT: 3306
+      DB_HOST: proxysql
+      DB_PORT: 6033
       DB_NAME: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in the Compose env file}
       DB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in the Compose env file}
       DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in the Compose env file}
-      MONGO_HOST: mongodb
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      MONGO_HOSTS: mongo1,mongo2,mongo3
       MONGO_PORT: 27017
+      MONGO_REPLICA_SET: rs0
       MONGO_DB: ${MONGO_DB_NAME:?Set MONGO_DB_NAME in the Compose env file}
       MONGO_USER: ${MONGO_APP_USERNAME:?Set MONGO_APP_USERNAME in the Compose env file}
       MONGO_PASSWORD: ${MONGO_APP_PASSWORD:?Set MONGO_APP_PASSWORD in the Compose env file}
       CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:-60}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      REDIS_SENTINELS: redis-sentinel1:26379,redis-sentinel2:26379,redis-sentinel3:26379
+      REDIS_MASTER_NAME: mymaster
       APPLICATION_NODE: app1
     restart: unless-stopped
     depends_on:
@@ -231,6 +233,47 @@ services:
       - application
       - database
 
+  db-bootstrap:
+    build: ./application
+    command: ["node", "init-db-users.js"]
+    environment:
+      DB_BOOTSTRAP_HOSTS: galera1,galera2,galera3
+      DB_PORT: 3306
+      DB_ADMIN_USER: root
+      DB_ADMIN_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in the Compose env file}
+      PROXYSQL_MONITOR_USER: ${PROXYSQL_MONITOR_USER:-proxysql_monitor}
+      PROXYSQL_MONITOR_PASSWORD: ${PROXYSQL_MONITOR_PASSWORD:?Set PROXYSQL_MONITOR_PASSWORD in the Compose env file}
+    restart: "no"
+    depends_on:
+      galera1:
+        condition: service_healthy
+    networks:
+      - database
+
+  proxysql:
+    build: ./proxysql
+    environment:
+      PROXYSQL_ADMIN_PASSWORD: ${PROXYSQL_ADMIN_PASSWORD:?Set PROXYSQL_ADMIN_PASSWORD in the Compose env file}
+      PROXYSQL_MONITOR_USER: ${PROXYSQL_MONITOR_USER:-proxysql_monitor}
+      PROXYSQL_MONITOR_PASSWORD: ${PROXYSQL_MONITOR_PASSWORD:?Set PROXYSQL_MONITOR_PASSWORD in the Compose env file}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in the Compose env file}
+      CATALOG_DB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in the Compose env file}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in the Compose env file}
+    restart: unless-stopped
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysql -u admin -p"$${PROXYSQL_ADMIN_PASSWORD}" -h 127.0.0.1 -P6032 -e "SELECT 1" >/dev/null 2>&1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - database
+
   catalog-init:
     build: ./application
     command: ["node", "init-db.js"]
@@ -244,42 +287,303 @@ services:
     depends_on:
       galera1:
         condition: service_healthy
-      mongodb:
+      proxysql:
         condition: service_healthy
-      redis:
+      mongo-init:
+        condition: service_completed_successfully
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
         condition: service_healthy
     networks:
       - database
 
-  mongodb:
+  mongo-keyfile-init:
     image: mongo:8
+    user: root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -s /keyfile/keyfile ]; then
+          head -c 512 /dev/urandom | base64 > /keyfile/keyfile
+        fi
+        chown 999:999 /keyfile/keyfile
+        chmod 400 /keyfile/keyfile
+    volumes:
+      - mongo-keyfile:/keyfile
+    restart: "no"
+    networks:
+      - database
+
+  mongo1:
+    image: mongo:8
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --keyFile
+      - /keyfile/keyfile
+      - --wiredTigerCacheSizeGB
+      - "0.25"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
     volumes:
       - mongodb-data:/data/db
+      - mongo-keyfile:/keyfile:ro
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "mongosh --quiet --username \"$${MONGO_INITDB_ROOT_USERNAME}\" --password \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1",
-        ]
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --host 127.0.0.1
+          --username "$$MONGO_ROOT_USERNAME"
+          --password "$$MONGO_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
     networks:
       - database
 
-  redis:
+  mongo2:
+    image: mongo:8
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --keyFile
+      - /keyfile/keyfile
+      - --wiredTigerCacheSizeGB
+      - "0.25"
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
+    volumes:
+      - mongodb2-data:/data/db
+      - mongo-keyfile:/keyfile:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --host 127.0.0.1
+          --username "$$MONGO_ROOT_USERNAME"
+          --password "$$MONGO_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+      mongo1:
+        condition: service_started
+    networks:
+      - database
+
+  mongo3:
+    image: mongo:8
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --keyFile
+      - /keyfile/keyfile
+      - --wiredTigerCacheSizeGB
+      - "0.25"
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
+    volumes:
+      - mongodb3-data:/data/db
+      - mongo-keyfile:/keyfile:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --host 127.0.0.1
+          --username "$$MONGO_ROOT_USERNAME"
+          --password "$$MONGO_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+      mongo1:
+        condition: service_started
+    networks:
+      - database
+
+  mongo-init:
+    image: mongo:8
+    network_mode: "service:mongo1"
+    entrypoint: ["/bin/bash", "/scripts/init-replica.sh"]
+    environment:
+      MONGO_BOOTSTRAP_HOST: 127.0.0.1:27017
+      MONGO_REPLICA_SET: rs0
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the Compose env file}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the Compose env file}
+    volumes:
+      - ./mongo/init-replica.sh:/scripts/init-replica.sh:ro
+    restart: "no"
+    depends_on:
+      mongo1:
+        condition: service_started
+      mongo2:
+        condition: service_started
+      mongo3:
+        condition: service_started
+
+  redis-master:
     image: redis:7-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis-master.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
     networks:
-      - database
+      database:
+        ipv4_address: 172.32.0.11
+
+  redis-replica1:
+    image: redis:7-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis-replica.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    networks:
+      database:
+        ipv4_address: 172.32.0.12
+
+  redis-replica2:
+    image: redis:7-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis-replica.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    networks:
+      database:
+        ipv4_address: 172.32.0.13
+
+  redis-sentinel1:
+    image: redis:7-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cp /usr/local/etc/redis/sentinel.conf /data/sentinel.conf
+        exec redis-server /data/sentinel.conf --sentinel
+    volumes:
+      - ./redis/sentinel.conf:/usr/local/etc/redis/sentinel.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica1:
+        condition: service_started
+      redis-replica2:
+        condition: service_started
+    networks:
+      database:
+        ipv4_address: 172.32.0.14
+
+  redis-sentinel2:
+    image: redis:7-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cp /usr/local/etc/redis/sentinel.conf /data/sentinel.conf
+        exec redis-server /data/sentinel.conf --sentinel
+    volumes:
+      - ./redis/sentinel.conf:/usr/local/etc/redis/sentinel.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica1:
+        condition: service_started
+      redis-replica2:
+        condition: service_started
+    networks:
+      database:
+        ipv4_address: 172.32.0.15
+
+  redis-sentinel3:
+    image: redis:7-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cp /usr/local/etc/redis/sentinel.conf /data/sentinel.conf
+        exec redis-server /data/sentinel.conf --sentinel
+    volumes:
+      - ./redis/sentinel.conf:/usr/local/etc/redis/sentinel.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica1:
+        condition: service_started
+      redis-replica2:
+        condition: service_started
+    networks:
+      database:
+        ipv4_address: 172.32.0.16
 
   galera1:
     image: bitnamilegacy/mariadb-galera:11.4.7-debian-12-r3
@@ -293,8 +597,10 @@ services:
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "yes"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
       MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
+    entrypoint: ["/bin/bash", "/usr/local/bin/galera-entrypoint.sh"]
     volumes:
       - galera1-data:/bitnami/mariadb
+      - ./galera/entrypoint.sh:/usr/local/bin/galera-entrypoint.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"$${MARIADB_ROOT_PASSWORD}\""]
       interval: 10s
@@ -375,11 +681,19 @@ services:
       - app2
       - app3
       - catalog-init
+      - proxysql
+      - mongo1
+      - mongo2
+      - mongo3
+      - redis-master
+      - redis-replica1
+      - redis-replica2
+      - redis-sentinel1
+      - redis-sentinel2
+      - redis-sentinel3
       - galera1
       - galera2
       - galera3
-      - mongodb
-      - redis
     networks:
       - edge
       - application
@@ -390,6 +704,9 @@ volumes:
   galera2-data:
   galera3-data:
   mongodb-data:
+  mongodb2-data:
+  mongodb3-data:
+  mongo-keyfile:
 
 networks:
   edge:
@@ -403,3 +720,6 @@ networks:
         - subnet: 172.31.0.0/24
   database:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.32.0.0/24

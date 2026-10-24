@@ -5,9 +5,11 @@ The lab in this folder already covers ab, Siege, JMeter and container-level Chao
 
 ## 1. Baseline and functional checks (before any fault)
 
-- Every layer is healthy: HAProxy backends all UP, `/api/health` returns OK, Galera `wsrep_cluster_size=3`, VIPs held by their masters.
+- Every layer is healthy: HAProxy backends all UP, `/api/health` returns OK, Galera `wsrep_cluster_size=3`, `rs0` has one PRIMARY and two SECONDARY members, and Sentinel reports `mymaster` with two replicas.
+- ProxySQL classifies the Galera nodes: one ONLINE writer in hostgroup 10 and readers in hostgroup 30.
 - Round-robin: the `X-Web-Node` and `X-Presentation-LB` headers rotate across web1-3.
 - Data consistency: a write on one Galera node is readable on the others; cache hits and misses behave correctly.
+- `GET /api/health` returns 200 `degraded` (not 503) when only MongoDB or Redis is down.
 
 ## 2. Performance tests
 
@@ -37,10 +39,16 @@ Run each under constant load; record outage time and failed requests.
 | Both LBs of one tier | stop both | Total outage, recovery on restart (negative test) |
 | 1 of 3 web/app nodes | stop | HAProxy health check drops it; zero or near-zero errors |
 | 2 of 3 web/app nodes | stop | Reduced capacity but still serving |
-| Galera node | stop galera2 or galera3 | Cluster keeps quorum |
-| Galera node | stop galera1 | **Expected to fail**: `DB_HOST=galera1` is a single point |
-| Redis | stop | Graceful degradation: slower DB-only reads, no 500s |
-| MongoDB | stop | Same; reviews degraded |
+| Galera writer (hostgroup 10) | stop the current writer | ProxySQL promotes another node; reads and writes keep working |
+| Galera node | stop galera2 or galera3 | Cluster keeps quorum; ProxySQL reclassifies the node |
+| Galera node | stop galera1 | **No longer a single point**: ProxySQL promotes another writer |
+| ProxySQL | stop | Total database outage for the API (negative test); restart restores service |
+| MongoDB primary | stop mongo1 (or the current primary) | `rs0` elects a new primary; reviews keep working (200/201) |
+| MongoDB secondary | stop mongo2 or mongo3 | Replica set keeps a primary and a secondary; no user impact |
+| Redis master | stop the current master | Sentinel promotes a replica; catalog keeps working, possibly from MariaDB during the transition |
+| Redis all data nodes | stop master and replicas | `/api/health` 200 `degraded`; catalog 200 from MariaDB; `/cache/clear` 503 |
+| Redis sentinels | stop two of three | No automatic failover while quorum is lost; the current master still serves |
+| Redis | stop all six containers | Graceful degradation: slower DB-only reads, no 500s on the catalog |
 | Entry proxy | stop | Total outage, accepted Docker Desktop limitation |
 
 ## 4. Chaos engineering tests
@@ -64,10 +72,21 @@ compare against the hypothesis, recover, record findings.
 
 ## Gaps the tests will likely expose
 
-- `DB_HOST=galera1` in the app is a single point of failure.
-- Redis and MongoDB are single instances.
 - `presentation-entry` is a single point of failure.
+- ProxySQL is a single instance; stopping it takes the whole database tier out of the API.
 - Compose `restart: unless-stopped` does not restart a container that was stopped deliberately.
+- All containers still run on one Docker host, so host or Docker Desktop failure is a total outage.
+- Sentinel uses fixed IPs in the `172.32.0.0/24` database network; changing that subnet requires updating `redis/sentinel.conf` and `redis/redis-replica.conf`.
+
+## Results observed on 2026-10-23
+
+| Fault | Observed result |
+|---|---|
+| `galera3` (writer) stopped | ProxySQL promoted `galera2`; a test write inserted 1 row; catalog stayed 200. After restart, `galera3` became writer again and the cluster returned to `size=3`, `Synced`, `Primary`. |
+| `mongo1` (primary) stopped | `mongo2` was elected primary; `GET` reviews returned 200 and `POST` returned 201. After restart, `mongo1` became primary again. |
+| Current Redis master stopped | Sentinel promoted another node; `/api/health` returned 200 and the catalog returned 200 with `redis (unavailable) -> mariadb`; `/cache/clear` returned 503. |
+| All Redis containers stopped | `/api/health` returned 200 `degraded`; the catalog returned 200 from MariaDB. After restart, health returned to `ok` and the catalog repopulated the cache. |
+| `app1` stopped | HAProxy removed the node; `/api/health` stayed 200 on `app2`/`app3`. |
 
 ## Commonly used tools
 
@@ -91,4 +110,5 @@ compare against the hypothesis, recover, record findings.
 1. Add Prometheus and Grafana (HAProxy exporter, cAdvisor) so each experiment has graphs of its hypothesis.
 2. Add Pumba or Toxiproxy to the lab for latency, loss and partition experiments.
 3. Add k6 or Locust for scripted, threshold-based tests that can run in CI.
-4. Remove the `galera1` single point (database-aware proxy or managed endpoint) and rerun the DB failover test.
+4. Automate the ProxySQL, MongoDB and Redis failover checks in a repeatable script and record detection/recovery times.
+5. Exercise split-brain and network partitions between Galera halves and between the API and the data tier.

@@ -23,3 +23,7 @@ credentials.json
 backups/
 **/backups/
 
+# Python bytecode from local test runs.
+__pycache__/
+*.pyc
+

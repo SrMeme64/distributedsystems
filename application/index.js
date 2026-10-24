@@ -1,8 +1,9 @@
 import { createServer } from "node:http";
 import { MongoClient } from "mongodb";
 import mysql from "mysql2/promise";
-import { createClient } from "redis";
-import { getCachedOrLoad } from "./catalog-cache.js";
+import { getCatalog } from "./catalog-cache.js";
+import { buildMongoUri } from "./mongo-config.js";
+import { createRedisConnection } from "./redis-client.js";
 
 const required = (name) => {
   const value = process.env[name];
@@ -12,6 +13,15 @@ const required = (name) => {
   return value;
 };
 
+const positiveInteger = (name, fallback, maximum = Number.MAX_SAFE_INTEGER) => {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`${name} must be an integer between 1 and ${maximum}`);
+  }
+  return value;
+};
+
+const poolSize = positiveInteger("DB_POOL_SIZE", 10, 100);
 const pool = mysql.createPool({
   host: required("DB_HOST"),
   port: Number(process.env.DB_PORT || 3306),
@@ -19,26 +29,97 @@ const pool = mysql.createPool({
   user: required("DB_USER"),
   password: required("DB_PASSWORD"),
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: poolSize,
+  maxIdle: poolSize,
+  idleTimeout: positiveInteger("DB_POOL_IDLE_TIMEOUT_MS", 60_000),
+  connectTimeout: positiveInteger("DB_CONNECT_TIMEOUT_MS", 5_000),
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10_000,
 });
 
-const mongo = new MongoClient(
-  `mongodb://${required("MONGO_HOST")}:${Number(process.env.MONGO_PORT || 27017)}/${encodeURIComponent(required("MONGO_DB"))}`,
-  {
-    auth: {
-      username: required("MONGO_USER"),
-      password: required("MONGO_PASSWORD"),
-    },
-    authSource: required("MONGO_DB"),
+const mongoDatabase = required("MONGO_DB");
+const mongoOptions = {
+  auth: {
+    username: required("MONGO_USER"),
+    password: required("MONGO_PASSWORD"),
   },
-);
-const redis = createClient({
-  socket: {
-    host: required("REDIS_HOST"),
-    port: Number(process.env.REDIS_PORT || 6379),
+  authSource: mongoDatabase,
+  serverSelectionTimeoutMS: positiveInteger("MONGO_SERVER_SELECTION_TIMEOUT_MS", 5_000),
+};
+const createMongoClient = () => new MongoClient(buildMongoUri(), mongoOptions);
+
+let mongo = createMongoClient();
+let mongoConnecting = null;
+
+// The driver closes the topology when connect() fails but keeps the client
+// attached to it, so the same client cannot retry. Replace it on failure so a
+// request after the replica set recovers opens a fresh connection.
+const getMongo = () => {
+  if (mongoConnecting) {
+    return mongoConnecting;
+  }
+  mongoConnecting = (async () => {
+    try {
+      await mongo.connect();
+      return mongo;
+    } catch (error) {
+      const failed = mongo;
+      mongo = createMongoClient();
+      void failed.close().catch(() => {});
+      throw error;
+    } finally {
+      mongoConnecting = null;
+    }
+  })();
+  return mongoConnecting;
+};
+
+let redisConnection = null;
+let redisConnecting = false;
+
+const connectRedis = async () => {
+  if (redisConnecting) {
+    return;
+  }
+  redisConnecting = true;
+  try {
+    redisConnection = await createRedisConnection();
+    console.log(`Redis cache connected (${redisConnection.mode})`);
+  } catch (error) {
+    redisConnection = null;
+    console.error("Redis cache unavailable; catalog reads will use MariaDB:", error.message);
+  } finally {
+    redisConnecting = false;
+  }
+};
+
+const withTimeout = (promise, milliseconds, label) => {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${milliseconds} ms`)),
+      milliseconds,
+    );
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+const redisCommandTimeout = positiveInteger("REDIS_COMMAND_TIMEOUT_MS", 2_000, 60_000);
+
+// A Sentinel client keeps its last known master and can leave commands waiting
+// while it reconnects. The cache is disposable, so every command gets a short
+// deadline and the catalog falls back to MariaDB instead of stalling the API.
+const withRedisTimeout = (client) => ({
+  get isReady() {
+    return client.isReady;
   },
+  get: (key) => withTimeout(client.get(key), redisCommandTimeout, "Redis GET"),
+  set: (...args) => withTimeout(client.set(...args), redisCommandTimeout, "Redis SET"),
+  eval: (...args) => withTimeout(client.eval(...args), redisCommandTimeout, "Redis EVAL"),
+  del: (...args) => withTimeout(client.del(...args), redisCommandTimeout, "Redis DEL"),
+  ping: () => withTimeout(client.ping(), redisCommandTimeout, "Redis PING"),
 });
-redis.on("error", (error) => console.error("Redis client error:", error));
 
 class HttpError extends Error {
   constructor(statusCode, message, trace) {
@@ -75,13 +156,28 @@ const sendJson = (response, statusCode, payload, trace = []) => {
 };
 
 const start = async () => {
-  await Promise.all([mongo.connect(), redis.connect()]);
-  const reviews = mongo.db(required("MONGO_DB")).collection("product_reviews");
+  // Warm up MongoDB in the background. The API must start even if the replica
+  // set is still electing a primary, and getMongo() retries on later requests.
+  void getMongo()
+    .then(() => console.log("MongoDB replica set connected"))
+    .catch((error) =>
+      console.error("MongoDB is not reachable at startup; reviews will fail until it recovers:", error.message),
+    );
+
   const productsCacheKey = "store:products:cheapest";
-  const cacheTtlSeconds = Number(process.env.CATALOG_CACHE_TTL_SECONDS || 60);
-  if (!Number.isSafeInteger(cacheTtlSeconds) || cacheTtlSeconds < 1) {
-    throw new Error("CATALOG_CACHE_TTL_SECONDS must be a positive integer");
-  }
+  const cacheTtlSeconds = positiveInteger("CATALOG_CACHE_TTL_SECONDS", 60);
+
+  await connectRedis();
+  const redisRetry = setInterval(() => {
+    if (!redisConnection) {
+      void connectRedis();
+    }
+  }, positiveInteger("REDIS_RETRY_INTERVAL_MS", 15_000));
+  redisRetry.unref();
+
+  const activeRedis = () =>
+    redisConnection?.client.isReady ? withRedisTimeout(redisConnection.client) : null;
+
   const server = createServer((request, response) => {
     const trace = [
       request.headers["x-presentation-lb"] || "presentation-lb-unknown",
@@ -93,8 +189,37 @@ const start = async () => {
       const pathname = new URL(request.url, "http://localhost").pathname;
 
       if (request.method === "GET" && pathname === "/health") {
-        await Promise.all([pool.query("SELECT 1"), mongo.db().command({ ping: 1 }), redis.ping()]);
-        sendJson(response, 200, { status: "ok" }, [...trace, "galera1", "mongodb", "redis"]);
+        const redis = activeRedis();
+        const checks = await Promise.allSettled([
+          withTimeout(pool.query("SELECT 1"), 2_000, "MariaDB health check"),
+          withTimeout(
+            getMongo().then((client) => client.db().command({ ping: 1 })),
+            1_500,
+            "MongoDB health check",
+          ),
+          redis
+            ? withTimeout(redis.ping(), 500, "Redis health check")
+            : Promise.reject(new Error("Redis is not ready")),
+        ]);
+
+        const dependencies = {
+          mariadb: checks[0].status === "fulfilled" ? "ok" : "unavailable",
+          mongodb: checks[1].status === "fulfilled" ? "ok" : "unavailable",
+          redis: checks[2].status === "fulfilled" ? "ok" : "unavailable",
+        };
+        const allOk = Object.values(dependencies).every((value) => value === "ok");
+        const status =
+          dependencies.mariadb !== "ok" ? "unavailable" : allOk ? "ok" : "degraded";
+
+        // MariaDB is the only dependency that makes the API unusable. MongoDB
+        // only affects reviews and Redis only affects performance, so the load
+        // balancers must keep receiving 200 while those two recover.
+        sendJson(
+          response,
+          dependencies.mariadb === "ok" ? 200 : 503,
+          { status, dependencies },
+          [...trace, "mariadb", "mongodb", "redis"],
+        );
         return;
       }
 
@@ -108,32 +233,63 @@ const start = async () => {
       }
 
       if (request.method === "GET" && pathname === "/products/cheapest") {
+        const loadCatalog = async () => {
+          const [rows] = await pool.execute(
+            "SELECT id, sku, name, description, price FROM products ORDER BY price ASC, id ASC LIMIT 10",
+          );
+          return rows;
+        };
+
+        const redis = activeRedis();
+        if (!redis) {
+          trace.push("mariadb", "redis (unavailable)");
+          const products = await loadCatalog();
+          sendJson(response, 200, products, trace);
+          return;
+        }
+
+        let cacheFailed = false;
         trace.push("redis");
-        const { value: products, cacheHit } = await getCachedOrLoad({
+        const { value: products, cacheHit, cacheAvailable } = await getCatalog({
           redis,
           cacheKey: productsCacheKey,
           ttlSeconds: cacheTtlSeconds,
           load: async () => {
-            trace[trace.length - 1] = "redis (cache miss)";
-            trace.push("galera1");
-            const [rows] = await pool.execute(
-              "SELECT id, sku, name, description, price FROM products ORDER BY price ASC, id ASC LIMIT 10",
-            );
-            trace.push("redis (cache write)");
-            return rows;
+            trace[trace.length - 1] = cacheFailed
+              ? "redis (unavailable)"
+              : "redis (cache miss)";
+            trace.push("mariadb");
+            return loadCatalog();
+          },
+          onCacheError: (error) => {
+            cacheFailed = true;
+            console.error("Catalog cache unavailable; serving from MariaDB:", error.message);
           },
         });
+
         if (cacheHit) {
           trace.push("cache hit");
-          sendJson(response, 200, products, trace);
-          return;
+        } else if (cacheAvailable) {
+          trace.push("redis (cache write)");
         }
         sendJson(response, 200, products, trace);
         return;
       }
 
       if (request.method === "POST" && pathname === "/cache/clear") {
-        const removed = await redis.del(productsCacheKey);
+        const redis = activeRedis();
+        if (!redis) {
+          throw new HttpError(503, "Catalog cache is unavailable", trace);
+        }
+
+        let removed;
+        try {
+          removed = await redis.del(productsCacheKey);
+        } catch (error) {
+          console.error("Could not clear the catalog cache:", error.message);
+          throw new HttpError(503, "Catalog cache is unavailable", trace);
+        }
+
         sendJson(
           response,
           200,
@@ -146,7 +302,10 @@ const start = async () => {
       const reviewMatch = pathname.match(/^\/products\/([A-Za-z0-9-]+)\/reviews$/);
       if (reviewMatch && request.method === "GET") {
         const productSku = reviewMatch[1];
-        const productReviews = await reviews
+        const client = await getMongo();
+        const productReviews = await client
+          .db(mongoDatabase)
+          .collection("product_reviews")
           .find({ sku: productSku })
           .sort({ createdAt: -1 })
           .limit(50)
@@ -177,7 +336,7 @@ const start = async () => {
         ) {
           throw new HttpError(400, "Provide reviewer, rating (1-5), and comment within the allowed lengths");
         }
-        trace.push("galera1 (product lookup)");
+        trace.push("mariadb (product lookup)");
         const [matches] = await pool.execute("SELECT 1 FROM products WHERE sku = ? LIMIT 1", [
           reviewMatch[1],
         ]);
@@ -191,7 +350,11 @@ const start = async () => {
           comment,
           createdAt: new Date(),
         };
-        const result = await reviews.insertOne(review);
+        const client = await getMongo();
+        const result = await client
+          .db(mongoDatabase)
+          .collection("product_reviews")
+          .insertOne(review);
         sendJson(response, 201, { id: result.insertedId.toString(), ...review }, [...trace, "mongodb (insert review)"]);
         return;
       }
@@ -219,8 +382,13 @@ const start = async () => {
   });
 
   const shutdown = () => {
+    clearInterval(redisRetry);
     server.close(() => {
-      void Promise.all([pool.end(), mongo.close(), redis.quit()]).then(() => process.exit(0));
+      void Promise.allSettled([
+        pool.end(),
+        mongo.close(),
+        redisConnection ? redisConnection.close() : Promise.resolve(),
+      ]).then(() => process.exit(0));
     });
   };
   process.on("SIGINT", shutdown);

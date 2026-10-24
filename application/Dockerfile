@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY index.js init-db.js catalog-cache.js ./
+COPY index.js init-db.js init-db-users.js catalog-cache.js mongo-config.js redis-client.js ./
 
 USER node
 

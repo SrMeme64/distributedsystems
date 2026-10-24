@@ -28,18 +28,28 @@ PROBE_URL = os.environ.get("PROBE_URL", "http://presentation-entry/api/health")
 PROBE_INTERVAL = float(os.environ.get("PROBE_INTERVAL", "1"))
 DRY_RUN = os.environ.get("DRY_RUN", "false") == "true"
 
-# Service names of the main project; the entry proxy, nagios and the init job are never touched.
+# Service names of the main project; the entry proxy, nagios and the init jobs are never touched.
 GROUPS = {
     "presentation-lb": ["presentation-lb-master", "presentation-lb-backup"],
     "web": ["web1", "web2", "web3"],
     "application-lb": ["application-lb-master", "application-lb-backup"],
     "app": ["app1", "app2", "app3"],
     "galera": ["galera1", "galera2", "galera3"],
-    "redis": ["redis"],
-    "mongodb": ["mongodb"],
+    "proxysql": ["proxysql"],
+    "mongodb": ["mongo1", "mongo2", "mongo3"],
+    "redis-data": ["redis-master", "redis-replica1", "redis-replica2"],
+    "redis-sentinel": ["redis-sentinel1", "redis-sentinel2", "redis-sentinel3"],
 }
-GROUPS["any"] = sum(GROUPS.values(), [])
-PROTECTED = {"presentation-entry", "nagios", "catalog-init"}
+GROUPS["redis"] = GROUPS["redis-data"] + GROUPS["redis-sentinel"]
+GROUPS["any"] = list(dict.fromkeys(service for group in GROUPS.values() for service in group))
+PROTECTED = {
+    "presentation-entry",
+    "nagios",
+    "catalog-init",
+    "db-bootstrap",
+    "mongo-init",
+    "mongo-keyfile-init",
+}
 
 stop_event = threading.Event()
 lock = threading.Lock()
