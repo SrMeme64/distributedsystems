@@ -1,9 +1,9 @@
-# PoC LAN y failover - 22-10-2026
+# PoC LAN y failover
 
-Esta carpeta conserva los scripts y resultados de la PoC ejecutada el
-22-10-2026. Describe una prueba realizada y ofrece scripts para repetirla; no
-significa que las pruebas futuras o las evoluciones opcionales del proyecto ya
-se hayan ejecutado.
+Scripts reutilizables para probar el sistema desde una laptop externa (cliente)
+contra el host Docker. Describe una prueba realizada y ofrece scripts para
+repetirla; no significa que las pruebas futuras o las evoluciones opcionales
+del proyecto ya se hayan ejecutado.
 
 ## Topología comprobada
 
@@ -83,7 +83,7 @@ bloquea, consulta al administrador.
    crear una regla limitada a ambas direcciones y a la interfaz correcta:
 
    ```powershell
-   .\poc\2026-10-22-lan-failover\Enable-LanPocFirewall.ps1 `
+   .\PoCs\Enable-LanPocFirewall.ps1 `
      -HostIPv4 "192.168.1.69" `
      -ClientIPv4 "192.168.1.68" `
      -InterfaceAlias "Wi-Fi" `
@@ -98,7 +98,7 @@ bloquea, consulta al administrador.
 3. En la laptop cliente, monitorizar la traza de la API:
 
    ```powershell
-   .\poc\2026-10-22-lan-failover\Monitor-LanHealth.ps1 `
+   .\PoCs\Monitor-LanHealth.ps1 `
      -HostIPv4 "192.168.1.69"
    ```
 
@@ -107,14 +107,14 @@ bloquea, consulta al administrador.
    presentación:
 
    ```powershell
-   .\poc\2026-10-22-lan-failover\Test-LanFailover.ps1 `
+   .\PoCs\Test-LanFailover.ps1 `
      -Layer Presentation
    ```
 
    Repetir para la capa de aplicación:
 
    ```powershell
-   .\poc\2026-10-22-lan-failover\Test-LanFailover.ps1 `
+   .\PoCs\Test-LanFailover.ps1 `
      -Layer Application
    ```
 
@@ -128,7 +128,7 @@ bloquea, consulta al administrador.
    elevado en el host):
 
    ```powershell
-   .\poc\2026-10-22-lan-failover\Remove-LanPocFirewall.ps1 `
+   .\PoCs\Remove-LanPocFirewall.ps1 `
      -HostIPv4 "192.168.1.69" `
      -ClientIPv4 "192.168.1.68" `
      -InterfaceAlias "Wi-Fi"
@@ -137,3 +137,12 @@ bloquea, consulta al administrador.
 Los comandos de alta y baja admiten `-WhatIf` para revisar la acción antes de
 aplicarla. Revisa siempre las IP, el perfil y la interfaz actuales: pueden
 cambiar entre sesiones.
+
+## Scripts incluidos
+
+| Script | Función |
+|---|---|
+| `Enable-LanPocFirewall.ps1` | Crea una regla de firewall limitada a TCP/80 entre host y cliente por la interfaz correcta. Requiere PowerShell como administrador. |
+| `Remove-LanPocFirewall.ps1` | Elimina la regla de firewall creada por `Enable-LanPocFirewall.ps1`. Verifica IPs, interfaz y puerto antes de quitar. |
+| `Monitor-LanHealth.ps1` | Monitoriza la API del host desde el cliente, imprimiendo HTTP status y traza de cada solicitud. |
+| `Test-LanFailover.ps1` | Pausa el HAProxy master de la capa indicada, espera el failover al backup y luego recupera el master. |
