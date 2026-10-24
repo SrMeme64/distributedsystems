@@ -54,24 +54,15 @@ flowchart LR
 
 La API usa `DB_HOST=proxysql` (no `galera1`), ProxySQL promueve otro writer si el actual falla. MongoDB y Redis tienen alta disponibilidad local con failover automático. Todo corre en un solo host: **no** protege contra la caída del host, de Docker Desktop, de `presentation-entry` ni de la red local. El objetivo es tolerar la caída de réplicas y procesos dentro del mismo host.
 
+### Objetivos
+
+- **Resiliencia:** el sistema tolera la caída de réplicas de API, nodos Galera, primario de MongoDB y maestro de Redis sin interrumpir el servicio; el catálogo se sirve desde MariaDB si Redis no responde.
+- **Alta disponibilidad:** ProxySQL promueve automáticamente otro writer de Galera; MongoDB elige otro primario; Sentinel promueve otra réplica de Redis; HAProxy retira nodos caídos del balanceo.
+- **Escalabilidad:** el pool de conexiones se parametriza con `DB_POOL_SIZE` por réplica de API; al escalar réplicas se comprueba que `N × DB_POOL_SIZE` no supere los límites de ProxySQL y MariaDB.
+
 ### Mejoras de la capa de datos (implementadas)
 
 Las 7 mejoras solicitadas están implementadas y verificadas:
-
-```mermaid
-flowchart TB
-    subgraph mejoras["Mejoras implementadas (7/7)"]
-        direction TB
-        m1["1. MongoDB replica set rs0<br/>(mongo1 · mongo2 · mongo3)<br/>Failover automático de primario"]
-        m2["2. Redis HA con Sentinel<br/>(maestro + 2 réplicas + 3 centinelas)<br/>Promoción automática"]
-        m3["3. Redis descartable<br/>(sin AOF/RDB, reconstruye desde MariaDB)<br/>Fallback del catálogo a MariaDB"]
-        m4["4. Sin conexión directa a galera1<br/>(API usa DB_HOST=proxysql)<br/>ProxySQL descubre al writer"]
-        m5["5. Proxy DB-aware<br/>(ProxySQL 2.6, hostgroups 10/20/30/40)<br/>Monitoreo de wsrep"]
-        m6["6. Enrutamiento lectura/escritura<br/>(SELECT → hostgroup 30, escrituras → 10)<br/>Failover de writer automático"]
-        m7["7. Pool revisado al escalar<br/>(DB_POOL_SIZE por API, 3× total)<br/>Límites ProxySQL/Galera documentados"]
-    end
-    m1 --> m2 --> m3 --> m4 --> m5 --> m6 --> m7
-```
 
 | # | Mejora | Estado |
 |---|---|---|
@@ -82,6 +73,17 @@ flowchart TB
 | 5 | Proxy DB-aware | ✅ Implementado y verificado |
 | 6 | Enrutamiento lectura/escritura en Galera | ✅ Implementado y verificado |
 | 7 | Límites del pool al escalar réplicas | ✅ Implementado y verificado |
+
+**Resultados de failover (23-10-2026):**
+
+| Falla | Resultado |
+|---|---|
+| Writer Galera `galera3` detenido | ProxySQL promovió `galera2`; escritura insertó 1 fila; catálogo en 200. Al reiniciar, `galera3` recuperó el writer y `size=3`, `Synced`, `Primary`. |
+| Primario MongoDB `mongo1` detenido | `mongo2` elegido primario; GET reviews 200, POST 201. Al reiniciar, `mongo1` volvió como primario. |
+| Maestro Redis `redis-master` detenido | Sentinel promovió `172.32.0.12`; health `degraded`, catálogo `redis (unavailable) -> mariadb`, cache clear `503`. Al reiniciar, health `ok`. |
+| Todos los Redis detenidos | Health `degraded`, catálogo 200 desde MariaDB, cache clear 503. Tras reiniciar, health `ok` y catálogo repobló caché. |
+| `galera1` detenido y reiniciado solo | `galera/entrypoint.sh` detectó datos con `safe_to_bootstrap=0` y lo unió al clúster; `wsrep_cluster_size` volvió a 3. |
+| MongoDB caído al arrancar `app1` | `app1` arrancó en `degraded` (reseñas 503). Al volver `rs0`, health `ok` y reseñas 200 sin reiniciar la API. |
 
 ## Capa de datos
 
@@ -251,90 +253,8 @@ curl.exe -i "$baseUrl/api/health"
 - Con `app1` detenido: 3 solicitudes `HTTP 200`, trazas `app3`, `app2`, `app3`.
 - Tras recuperar `app1`: `HTTP 200`, traza `app1`.
 
-## PoC 3: Failover de la capa de datos
+## PoC 3: Chaos Engineering (opcional)
 
-**Objetivo:** comprobar que la API sigue atendiendo cuando falla el writer de Galera, el primario de MongoDB o el maestro de Redis.
-
-### Galera writer
-
-**En el host:**
-
-```powershell
-# 1. Consulta el writer actual
-docker exec distributed-three-tier-proxysql-1 mysql -u admin -pchange-this-proxysql-admin-password -h 127.0.0.1 -P6032 -e "SELECT hostgroup, srv_host, status FROM stats_mysql_connection_pool WHERE hostgroup=10;"
-
-# 2. Detén el writer (galera3), espera 10 s y prueba una escritura
-docker compose --env-file .env.exam stop galera3
-Start-Sleep -Seconds 10
-docker exec distributed-three-tier-proxysql-1 mysql -u store_app -pchange-this-catalog-password -h 127.0.0.1 -P6033 -D store -e "CREATE TABLE IF NOT EXISTS failover_probe (id INT); INSERT INTO failover_probe VALUES (1); SELECT COUNT(*) FROM failover_probe; DROP TABLE failover_probe;"
-curl.exe -i http://localhost/api/health
-
-# 3. Recupera galera3 y espera a que vuelva a Synced
-docker compose --env-file .env.exam start galera3
-```
-
-**Desde el cliente:** `curl.exe -i http://<IP_HOST>/api/health`
-
-**Resultado:** ProxySQL promovió `galera2`; la escritura insertó 1 fila y el catálogo siguió en 200. Al reiniciar, `galera3` recuperó el writer y el clúster quedó `size=3`, `Synced`, `Primary`.
-
-### MongoDB primary
-
-**En el host:**
-
-```powershell
-# 1. Identifica el primario
-docker exec distributed-three-tier-mongo1-1 mongosh --quiet --username store_admin --password change-this-mongodb-password --authenticationDatabase admin --eval "rs.status().members.map(m => m.name + '=' + m.stateStr).join(',')"
-
-# 2. Detén el primario, espera la elección y prueba lectura/escritura de reseñas
-docker compose --env-file .env.exam stop mongo1
-Start-Sleep -Seconds 18
-curl.exe -i http://localhost/api/products/ST-001/reviews
-$body = '{"reviewer":"failover-probe","rating":5,"comment":"mongo failover probe"}'
-Set-Content -Path "$env:TEMP\review.json" -Value $body -Encoding ascii
-curl.exe -i -X POST -H "Content-Type: application/json" --data-binary "@$env:TEMP\review.json" http://localhost/api/products/ST-001/reviews
-
-# 3. Recupera mongo1 y confirma que rs0 tiene primario + 2 secundarios
-docker compose --env-file .env.exam start mongo1
-```
-
-**Resultado:** `mongo2` fue elegido primario; GET reviews 200 y POST 201. Al reiniciar, `mongo1` volvió como primario.
-
-### Redis master
-
-**En el host:**
-
-```powershell
-# 1. Consulta el maestro
-docker exec distributed-three-tier-redis-sentinel1-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
-
-# 2. Detén el maestro (redis-master), espera 20 s y comprueba la promoción
-docker compose --env-file .env.exam stop redis-master
-Start-Sleep -Seconds 20
-docker exec distributed-three-tier-redis-sentinel1-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
-curl.exe -i http://localhost/api/health
-curl.exe -i http://localhost/api/products/cheapest
-
-# 3. Recupera redis-master
-docker compose --env-file .env.exam start redis-master
-```
-
-**Desde el cliente:** `curl.exe -i http://<IP_HOST>/api/health` y `curl.exe -i http://<IP_HOST>/api/products/cheapest`
-
-**Resultado:** Sentinel promovió `172.32.0.12`; health `degraded`, catálogo `redis (unavailable) -> mariadb`, cache clear `503`. Al reiniciar, health `ok`.
-
-### Caída total de Redis
-
-**En el host:**
-
-```powershell
-docker compose --env-file .env.exam stop redis-master redis-replica1 redis-replica2 redis-sentinel1 redis-sentinel2 redis-sentinel3
-# Comprueba: /api/health 200 degraded, catálogo 200, POST /api/cache/clear 503
-docker compose --env-file .env.exam start redis-master redis-replica1 redis-replica2 redis-sentinel1 redis-sentinel2 redis-sentinel3
-```
-
-**Resultado:** health `degraded`, catálogo 200 desde MariaDB, cache clear 503. Tras reiniciar, health `ok` y catálogo repobló caché.
-
-## PoC 4: Chaos Engineering (opcional)
 
 Inyecta una falla controlada en una réplica API y comprueba que el servicio mantiene disponibilidad:
 

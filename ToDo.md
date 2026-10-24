@@ -1,31 +1,31 @@
-# Mejoras de la capa de datos (solicitadas)
+# ToDo: mejoras de la capa de datos
 
-Las 7 mejoras solicitadas están implementadas y verificadas. Todo lo demás se
-descarta; este documento solo registra lo que se pidió.
+## Solicitado por el docente (7 puntos)
 
-## Estado
+| # | Mejora | Estado |
+|---|---|---|
+| 1 | MongoDB replica set / gestionado | ✅ `rs0` de 3 nodos; failover de primario validado |
+| 2 | Redis HA / gestionado | ✅ Maestro + 2 réplicas + 3 centinelas; failover validado |
+| 3 | Redis descartable o persistente | ✅ Descartable: sin AOF/RDB; catálogo se reconstruye desde MariaDB |
+| 4 | Eliminar conexión directa a `galera1` | ✅ API usa `DB_HOST=proxysql` |
+| 5 | Proxy DB-aware | ✅ ProxySQL 2.6 con hostgroups Galera y monitoreo de `wsrep` |
+| 6 | Enrutamiento lectura/escritura en Galera | ✅ `SELECT` → hostgroup 30, escrituras → hostgroup 10 |
+| 7 | Límites del pool al escalar réplicas | ✅ `DB_POOL_SIZE` por API, límites documentados |
 
-| # | Mejora solicitada | Implementado | Verificado |
-|---|---|---|---|
-| 1 | MongoDB replica set / gestionado | `rs0` de 3 nodos (`mongo1/2/3`) con keyfile, usuario `store_app` limitado | `mongo1=PRIMARY`, `mongo2/3=SECONDARY`; failover de primario validado |
-| 2 | Redis HA / gestionado | Maestro + 2 réplicas + 3 centinelas (quórum 2) | Sentinel promovió réplica al detener el maestro; health degradó y recuperó |
-| 3 | Redis descartable o persistente | Descartable: sin AOF ni RDB; catálogo se reconstruye desde MariaDB | Caída total de Redis: health `degraded`, catálogo 200 desde MariaDB, cache clear 503 |
-| 4 | Eliminar conexión directa a `galera1` | API usa `DB_HOST=proxysql` (puerto 6033) | ProxySQL enruta escrituras al hostgroup 10 y lecturas al 30 |
-| 5 | Proxy DB-aware | ProxySQL 2.6 con `mysql_galera_hostgroups` y monitoreo de `wsrep` | Failover de writer validado: `galera2` promovido al detener `galera3` |
-| 6 | Enrutamiento lectura/escritura en Galera | `SELECT ... FOR UPDATE` y escrituras → hostgroup 10; `SELECT` → hostgroup 30 | Verificado con `stats_mysql_query_digest` |
-| 7 | Límites del pool al escalar réplicas | `DB_POOL_SIZE` por API, `3 × DB_POOL_SIZE` total, límites ProxySQL/Galera documentados | 3 réplicas × 10 = 30 conexiones, por debajo de `max_connections=200/30` |
+## Adiciones (fuera de la solicitud original)
 
-## Verificación final (23-10-2026)
+Mejoras de resiliencia y operación implementadas durante la ejecución:
 
-- `docker compose --env-file .env.exam up -d` → código 0.
-- `/api/health` → `200 {"status":"ok","mariadb":"ok","mongodb":"ok","redis":"ok"}`.
-- Catálogo → 200; reseñas → 200.
-- Galera: `wsrep_cluster_size=3`, `Primary`, `Synced`.
-- Mongo: `mongo1=PRIMARY`, `mongo2/3=SECONDARY`.
-- Redis: Sentinel maestro `172.32.0.11` con 2 réplicas.
-- ProxySQL: SELECT → hostgroup 30; INSERT/DDL → hostgroup 10.
-- 11 tests unitarios pasan (`node --test`).
-- Nagios: 23 hosts, 0 errores.
+- Sentinel monitorea la IP fija `172.32.0.11` para evitar `TILT` cuando Docker elimina el DNS del maestro detenido.
+- `REDIS_COMMAND_TIMEOUT_MS` (2 s): cada comando de caché tiene límite; si Redis no responde, el catálogo se lee de MariaDB.
+- Fallback del catálogo a MariaDB cuando Redis no está disponible; `POST /api/cache/clear` devuelve `503`.
+- `timeout check 4s` en HAProxy para que un Redis lento no marque caídos los tres backends API.
+- La API arranca aunque MongoDB no esté disponible (conexión en segundo plano) y se reconecta automáticamente cuando el replica set vuelve.
+- `galera/entrypoint.sh`: detecta datos con `safe_to_bootstrap=0` y une `galera1` al clúster en lugar de negarse a arrancar.
+- `db-bootstrap` cicla `galera1,galera2,galera3` y reintenta `EAI_AGAIN`/`ENOTFOUND`.
+- Nagios con 23 hosts (proxysql, mongo1/2/3, redis-master/replica/sentinel).
+- Chaos Monkey con grupos `proxysql`, `mongodb`, `redis-data`, `redis-sentinel`; dashboard actualizado.
+- PoC 1, 2 y 3 recreadas y documentadas con resultados en el README.
 
 ## Recuperación de Galera (si todos los nodos caen)
 
