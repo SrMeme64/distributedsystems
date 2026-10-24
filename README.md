@@ -54,6 +54,35 @@ flowchart LR
 
 La API usa `DB_HOST=proxysql` (no `galera1`), ProxySQL promueve otro writer si el actual falla. MongoDB y Redis tienen alta disponibilidad local con failover automático. Todo corre en un solo host: **no** protege contra la caída del host, de Docker Desktop, de `presentation-entry` ni de la red local. El objetivo es tolerar la caída de réplicas y procesos dentro del mismo host.
 
+### Mejoras de la capa de datos (implementadas)
+
+Las 7 mejoras solicitadas están implementadas y verificadas:
+
+```mermaid
+flowchart TB
+    subgraph mejoras["Mejoras implementadas (7/7)"]
+        direction TB
+        m1["1. MongoDB replica set rs0<br/>(mongo1 · mongo2 · mongo3)<br/>Failover automático de primario"]
+        m2["2. Redis HA con Sentinel<br/>(maestro + 2 réplicas + 3 centinelas)<br/>Promoción automática"]
+        m3["3. Redis descartable<br/>(sin AOF/RDB, reconstruye desde MariaDB)<br/>Fallback del catálogo a MariaDB"]
+        m4["4. Sin conexión directa a galera1<br/>(API usa DB_HOST=proxysql)<br/>ProxySQL descubre al writer"]
+        m5["5. Proxy DB-aware<br/>(ProxySQL 2.6, hostgroups 10/20/30/40)<br/>Monitoreo de wsrep"]
+        m6["6. Enrutamiento lectura/escritura<br/>(SELECT → hostgroup 30, escrituras → 10)<br/>Failover de writer automático"]
+        m7["7. Pool revisado al escalar<br/>(DB_POOL_SIZE por API, 3× total)<br/>Límites ProxySQL/Galera documentados"]
+    end
+    m1 --> m2 --> m3 --> m4 --> m5 --> m6 --> m7
+```
+
+| # | Mejora | Estado |
+|---|---|---|
+| 1 | MongoDB replica set / gestionado | ✅ Implementado y verificado |
+| 2 | Redis HA / gestionado | ✅ Implementado y verificado |
+| 3 | Redis descartable | ✅ Implementado y verificado |
+| 4 | Eliminar conexión directa a `galera1` | ✅ Implementado y verificado |
+| 5 | Proxy DB-aware | ✅ Implementado y verificado |
+| 6 | Enrutamiento lectura/escritura en Galera | ✅ Implementado y verificado |
+| 7 | Límites del pool al escalar réplicas | ✅ Implementado y verificado |
+
 ## Capa de datos
 
 ### ProxySQL (MariaDB)
