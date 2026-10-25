@@ -276,3 +276,8 @@ Durante la ventana, ejecuta comprobaciones desde el cliente: `curl.exe -i http:/
 ## Documentación y evidencias
 
 Este README y los archivos Markdown del repositorio constituyen la documentación del proyecto. La capa de datos, los modos de falla y los resultados del 23-10-2026 están descritos en las secciones anteriores. El equipo debe completar los espacios pendientes con el diagrama JPG exportado y las evidencias de las PoC de carga y Chaos Monkey antes de presentar esos resultados como ejecutados.
+## Documentación y evidencias
+- [Diagrama de arquitectura](docs/arquitectura/diagrama-arquitectura.png)
+- [Evidencia de carga](docs/evidencias/poc-carga.txt)
+- [Evidencia de failover / chaos](docs/evidencias/chaos-failover.txt)
+- [Logs del stack](docs/evidencias/docker-logs.txt)
