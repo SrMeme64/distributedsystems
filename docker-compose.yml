@@ -5,7 +5,7 @@ services:
     image: haproxy:3.2-alpine
     volumes:
       - ./haproxy/presentation-master.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    restart: unless-stopped
+    restart: always
     depends_on:
       web1:
         condition: service_started
@@ -21,7 +21,7 @@ services:
     image: haproxy:3.2-alpine
     volumes:
       - ./haproxy/presentation-backup.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    restart: unless-stopped
+    restart: always
     depends_on:
       web1:
         condition: service_started
@@ -39,7 +39,7 @@ services:
       - "80:80"
     volumes:
       - ./haproxy/presentation-entry.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    restart: unless-stopped
+    restart: always
     depends_on:
       - presentation-lb-master
       - presentation-lb-backup
@@ -56,7 +56,7 @@ services:
       - NET_ADMIN
       - NET_BROADCAST
       - NET_RAW
-    restart: unless-stopped
+    restart: always
     depends_on:
       presentation-lb-master:
         condition: service_started
@@ -71,7 +71,7 @@ services:
       - NET_ADMIN
       - NET_BROADCAST
       - NET_RAW
-    restart: unless-stopped
+    restart: always
     depends_on:
       presentation-lb-backup:
         condition: service_started
@@ -79,7 +79,7 @@ services:
   web1:
     image: nginx:alpine
     hostname: webnode1
-    restart: unless-stopped
+    restart: always
     volumes:
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web/site1:/usr/share/nginx/html:ro
@@ -94,7 +94,7 @@ services:
   web2:
     image: nginx:alpine
     hostname: webnode2
-    restart: unless-stopped
+    restart: always
     volumes:
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web/site2:/usr/share/nginx/html:ro
@@ -109,7 +109,7 @@ services:
   web3:
     image: nginx:alpine
     hostname: webnode3
-    restart: unless-stopped
+    restart: always
     volumes:
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web/site3:/usr/share/nginx/html:ro
@@ -125,7 +125,7 @@ services:
     image: haproxy:3.2-alpine
     volumes:
       - ./haproxy/application-master.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    restart: unless-stopped
+    restart: always
     depends_on:
       app1:
         condition: service_started
@@ -141,7 +141,7 @@ services:
     image: haproxy:3.2-alpine
     volumes:
       - ./haproxy/application-backup.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    restart: unless-stopped
+    restart: always
     depends_on:
       app1:
         condition: service_started
@@ -163,7 +163,7 @@ services:
       - NET_ADMIN
       - NET_BROADCAST
       - NET_RAW
-    restart: unless-stopped
+    restart: always
     depends_on:
       application-lb-master:
         condition: service_started
@@ -178,7 +178,7 @@ services:
       - NET_ADMIN
       - NET_BROADCAST
       - NET_RAW
-    restart: unless-stopped
+    restart: always
     depends_on:
       application-lb-backup:
         condition: service_started
@@ -202,7 +202,7 @@ services:
       REDIS_SENTINELS: redis-sentinel1:26379,redis-sentinel2:26379,redis-sentinel3:26379
       REDIS_MASTER_NAME: mymaster
       APPLICATION_NODE: app1
-    restart: unless-stopped
+    restart: always
     depends_on:
       catalog-init:
         condition: service_completed_successfully
@@ -215,7 +215,7 @@ services:
     environment:
       <<: *application-environment
       APPLICATION_NODE: app2
-    restart: unless-stopped
+    restart: always
     depends_on:
       catalog-init:
         condition: service_completed_successfully
@@ -228,7 +228,7 @@ services:
     environment:
       <<: *application-environment
       APPLICATION_NODE: app3
-    restart: unless-stopped
+    restart: always
     depends_on:
       catalog-init:
         condition: service_completed_successfully
@@ -262,7 +262,7 @@ services:
       CATALOG_DB_NAME: ${CATALOG_DB_NAME:?Set CATALOG_DB_NAME in the Compose env file}
       CATALOG_DB_USER: ${CATALOG_DB_USER:?Set CATALOG_DB_USER in the Compose env file}
       CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Set CATALOG_DB_PASSWORD in the Compose env file}
-    restart: unless-stopped
+    restart: always
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
@@ -351,7 +351,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
-    restart: unless-stopped
+    restart: always
     depends_on:
       mongo-keyfile-init:
         condition: service_completed_successfully
@@ -388,7 +388,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
-    restart: unless-stopped
+    restart: always
     depends_on:
       mongo-keyfile-init:
         condition: service_completed_successfully
@@ -427,7 +427,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
-    restart: unless-stopped
+    restart: always
     depends_on:
       mongo-keyfile-init:
         condition: service_completed_successfully
@@ -466,7 +466,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
+    restart: always
     networks:
       database:
         ipv4_address: 172.32.0.11
@@ -481,7 +481,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
+    restart: always
     depends_on:
       redis-master:
         condition: service_healthy
@@ -499,7 +499,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
+    restart: always
     depends_on:
       redis-master:
         condition: service_healthy
@@ -522,7 +522,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
+    restart: always
     depends_on:
       redis-master:
         condition: service_healthy
@@ -549,7 +549,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
+    restart: always
     depends_on:
       redis-master:
         condition: service_healthy
@@ -576,7 +576,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    restart: unless-stopped
+    restart: always
     depends_on:
       redis-master:
         condition: service_healthy
@@ -604,7 +604,7 @@ services:
       GALERA_BOOTSTRAP_FALLBACK: "yes"
       GALERA_PEER_WAIT_SECONDS: "30"
     entrypoint: ["/bin/bash", "/usr/local/bin/galera-entrypoint.sh"]
-    restart: unless-stopped
+    restart: always
     stop_grace_period: 60s
     volumes:
       - galera1-data:/bitnami/mariadb
@@ -627,7 +627,7 @@ services:
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "no"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
       MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
-    restart: unless-stopped
+    restart: always
     stop_grace_period: 60s
     volumes:
       - galera2-data:/bitnami/mariadb
@@ -652,7 +652,7 @@ services:
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "no"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
       MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
-    restart: unless-stopped
+    restart: always
     stop_grace_period: 60s
     volumes:
       - galera3-data:/bitnami/mariadb
@@ -670,7 +670,7 @@ services:
 
   nagios:
     image: jasonrivers/nagios:latest
-    restart: unless-stopped
+    restart: always
     ports:
       - "127.0.0.1:8088:80"
     environment:
@@ -726,13 +726,21 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+          # Dynamic containers only get .128-.254 so they can never take a
+          # static address (.11/.12) while that container is stopped.
+          ip_range: 172.30.0.128/25
   application:
     internal: true
     ipam:
       config:
         - subnet: 172.31.0.0/24
+          ip_range: 172.31.0.128/25
   database:
     internal: true
     ipam:
       config:
         - subnet: 172.32.0.0/24
+          # Redis keeps .11-.16 fixed; Sentinel and the replicas address
+          # redis-master by 172.32.0.11, so dynamic allocation must not
+          # reuse that address after a stop/start of the whole stack.
+          ip_range: 172.32.0.128/25

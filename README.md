@@ -183,7 +183,7 @@ docker compose --env-file .env.exam logs --tail 100 catalog-init db-bootstrap mo
 3. Si hay datos y ningún par responde como `Primary` en 30 s, fuerza el bootstrap (`MARIADB_GALERA_FORCE_SAFETOBOOTSTRAP=yes`). Así un apagado brusco del equipo no deja el clúster bloqueado.
 4. Si algún par ya es `Primary`, se une a ese clúster.
 
-`galera2` y `galera3` arrancan con `condition: service_started` y `restart: unless-stopped`, de modo que se unen solos en cuanto `galera1` es primario. Los tres nodos tienen `stop_grace_period: 60s` para favorecer un cierre limpio.
+`galera2` y `galera3` arrancan con `condition: service_started` y `restart: always`, de modo que se unen solos en cuanto `galera1` es primario. Los tres nodos tienen `stop_grace_period: 60s` para favorecer un cierre limpio.
 
 > **Riesgo del bootstrap forzado:** `galera1` es el nodo de recuperación designado. Si su dato fuera más antiguo que el de un par, el bootstrap forzado perdería esas transacciones. En un solo host con los tres nodos detenidos a la vez esto no ocurre, porque los tres comparten el mismo instante de apagado. Si sospechas de datos divergentes, respalda los volúmenes y recupera la posición con `wsrep-recover` (ver `ToDo.md`) en lugar de confiar en el fallback.
 
@@ -193,9 +193,10 @@ Keepalived corre en sidecars que comparten el namespace de red de cada HAProxy. 
 
 Con la configuración actual **no hace falta reparar nada a mano**. Al reiniciar Docker Desktop o el equipo:
 
-1. Docker arranca solo todos los servicios con `restart: unless-stopped` (incluidos `web1`, `web2`, `web3` y `nagios`).
+1. Docker arranca solo todos los servicios con `restart: always` (incluidos `web1`, `web2`, `web3` y `nagios`). A diferencia de `unless-stopped`, `always` también los levanta si se habían detenido con `docker compose stop` antes del reinicio.
 2. `galera1` espera 30 s a un par `Primary`; si no lo hay, hace bootstrap y `galera2`/`galera3` se unen.
 3. Los sidecars de Keepalived detectan la interfaz y levantan el VIP sin intervención.
+4. Las IPs fijas de Redis (`172.32.0.11`–`.16`) están fuera del rango dinámico (`ip_range: 172.32.0.128/25`), así que ningún contenedor puede quedarse con la IP de `redis-master` mientras está detenido.
 
 Espera 60-90 s tras el reinicio y verifica:
 
@@ -207,19 +208,38 @@ docker exec distributed-three-tier-galera1-1 mariadb -u root -pchange-this-root-
 
 Debes ver todos los servicios `Up` (o `healthy`), `{"status":"ok",...}` y `wsrep_cluster_size = 3` con `wsrep_cluster_status = Primary`.
 
-**Si algo no vuelve** (por ejemplo, un `curl: (52) Empty reply from server`):
+**Si algo no vuelve** (por ejemplo, un `curl: (52) Empty reply from server` o un `503`):
 
 ```powershell
-# 1. Comprueba que web1-3 estén arriba; si no, levántalos primero
+# 0. Qué está realmente caído (Created/Exited incluidos)
+docker compose --env-file .env.exam ps -a
+
+# 1. Si hay contenedores en Created o Exited, levántalos
+docker compose --env-file .env.exam up -d
+
+# 2. Si web1-3 no están arriba, levántalos primero
 docker compose --env-file .env.exam up -d web1 web2 web3
 
-# 2. Recrea los HAProxy y luego los sidecars de Keepalived
+# 3. Recrea los HAProxy y luego los sidecars de Keepalived
 docker compose --env-file .env.exam up -d --force-recreate --no-deps presentation-lb-master presentation-lb-backup application-lb-master application-lb-backup
 docker compose --env-file .env.exam up -d --force-recreate --no-deps presentation-keepalived-master presentation-keepalived-backup application-keepalived-master application-keepalived-backup
 
-# 3. Si Galera no formó el clúster
+# 4. Si Galera no formó el clúster
 docker compose --env-file .env.exam up -d --no-deps galera2 galera3
+
+# 5. Si cambiaste código de la app o el init falla con variables faltantes
+docker compose --env-file .env.exam up -d --build
 ```
+
+**Diagnóstico de un `503 Service Unavailable`:** el `503` con `server: nginx` y `No server is available to handle this request` lo genera nginx (`web1-3`) cuando el VIP de aplicación (`172.31.0.250:8080`) no tiene backend. Comprueba en este orden:
+
+```powershell
+docker compose --env-file .env.exam ps -a | Select-String "app1|app2|app3"
+docker run --rm --network distributed-three-tier_application curlimages/curl:latest -sS -o NUL -w "app VIP %{http_code}`n" http://172.31.0.250:8080/health
+docker logs --tail 20 distributed-three-tier-application-lb-master-1
+```
+
+Si los tres `app` están `Exited`, levántalos con `up -d app1 app2 app3`. Si HAProxy muestra `application_nodes/<NOSRV>`, todos los backends están marcados DOWN y el problema está en los `app`, no en HAProxy.
 
 Para apagar de forma ordenada antes de suspender el equipo:
 
@@ -227,7 +247,7 @@ Para apagar de forma ordenada antes de suspender el equipo:
 docker compose --env-file .env.exam stop
 ```
 
-`docker compose stop` envía `SIGTERM` y respeta `stop_grace_period`, lo que permite a Galera cerrar limpio. Para detener sin borrar datos: `docker compose --env-file .env.exam down`. Para borrar volúmenes: `docker compose --env-file .env.exam down -v` (destructivo). Redis no tiene volúmenes de persistencia: al recrear sus contenedores la caché arranca vacía.
+`docker compose stop` envía `SIGTERM` y respeta `stop_grace_period`, lo que permite a Galera cerrar limpio. Con `restart: always`, esos contenedores vuelven solos en el siguiente arranque de Docker. Para detener sin borrar datos: `docker compose --env-file .env.exam down`. Para borrar volúmenes: `docker compose --env-file .env.exam down -v` (destructivo). Redis no tiene volúmenes de persistencia: al recrear sus contenedores la caché arranca vacía.
 
 ## PoC 1: Prueba de carga
 
