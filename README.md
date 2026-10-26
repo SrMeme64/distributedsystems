@@ -29,7 +29,6 @@ host Docker, para comprobar el comportamiento real sobre la LAN y no solo en
 - [PoC 2: failover por capas](#poc-2-failover-por-capas)
 - [PoC 3: Chaos Engineering](#poc-3-chaos-engineering)
 - [Apagado y arranque](#apagado-y-arranque)
-- [Dónde guardar los resultados](#dónde-guardar-los-resultados)
 - [Scripts de la demo](#scripts-de-la-demo)
 - [Créditos](#créditos)
 
@@ -58,10 +57,11 @@ tres centinelas.
 ```mermaid
 flowchart LR
     cliente[Usuario / navegador]
-    entry["HAProxy de entrada<br/>puerto 80 publicado"]
     subgraph presentacion["Presentación"]
+        entry["HAProxy de entrada<br/>puerto 80 publicado"]
         haprP["HAProxy master/backup<br/>Keepalived · VIP 172.30.0.250"]
         web["Nginx web1 · web2 · web3"]
+        entry --> haprP
         haprP --> web
     end
     subgraph aplicacion["Aplicación"]
@@ -70,13 +70,13 @@ flowchart LR
         haprA --> api
     end
     subgraph datos["Datos"]
-        proxy["ProxySQL<br/>writer 10 · reader 30"]
+        proxy["ProxySQL<br/>writer 10 · backup 20 · reader 30"]
         galera["MariaDB Galera<br/>galera1 · galera2 · galera3"]
         mongo[("MongoDB replica set rs0<br/>mongo1 · mongo2 · mongo3")]
         redis[("Redis Sentinel<br/>maestro + 2 réplicas<br/>3 centinelas")]
         proxy --- galera
     end
-    cliente --> entry --> haprP
+    cliente --> entry
     web --> haprA
     api -->|"escrituras y lecturas :6033"| proxy
     api -->|"reseñas"| mongo
@@ -360,21 +360,6 @@ Si quieres ver el punto de saturación, repite la carga caliente con
 concurrencia, duración, req/s, latencia media, p50/p95/p99, errores y códigos
 HTTP. No hace falta instalar `ab` ni ninguna otra herramienta.
 
-### Qué capturar
-
-| Escenario | Solicitudes | Concurrencia | Fallidas | Req/s | Tiempo medio |
-|---|---|---|---|---|---|
-| Caché fría | 1 | 1 | | | |
-| Caché caliente | 500 | 20 | | | |
-| Caché caliente (opcional) | 500 | 50 | | | |
-
-Guarda la salida completa en `PoCs/evidencias/poc1-carga-<fecha>.txt`.
-
-**Qué deberías observar:** la caché fría tarda más porque consulta MariaDB; la
-caliente baja la latencia y sube el throughput. Al aumentar la concurrencia, el
-throughput se estabiliza y la latencia sube: el cuello de botella está en las
-réplicas API y el balanceo, no en Redis.
-
 ### Resultados obtenidos (26-10-2026)
 
 Medición desde el cliente `PC-Principal` contra `http://192.168.1.72`, después
@@ -446,26 +431,6 @@ Si quieres probar una sola capa:
 
 Para revisar sin tocar nada: añade `-WhatIf`.
 
-### Qué capturar
-
-En el cliente, guarda la salida del monitor. En el host, guarda el resumen del
-script. Una tabla útil:
-
-| Fase | Traza antes | Cambio observado | Tiempo de failover | Vuelta al master | HTTP 200 / errores |
-|---|---|---|---|---|---|
-| API (`app1`) | | | | | |
-| Presentación | | | | | |
-| Aplicación | | | | | |
-
-Archivos sugeridos:
-
-- `PoCs/evidencias/poc2-failover-cliente-<fecha>.txt`
-- `PoCs/evidencias/poc2-failover-host-<fecha>.txt`
-
-**Qué deberías observar:** durante la convergencia puede haber uno o dos
-timeouts; después el servicio sigue respondiendo con las réplicas o el backup.
-El cliente no cambia de URL: siempre usa `http://<IP_HOST>/api/health`.
-
 ### Resultados obtenidos (26-10-2026)
 
 **Línea base** (120 sondeos entre 23:54:44 y 23:55:47): **120/120 `HTTP 200`**,
@@ -523,20 +488,6 @@ Si quieres controlar el nodo:
 ```
 
 Para revisar sin tocar nada: añade `-WhatIf`.
-
-### Qué capturar
-
-| Nodo | Ventana de falla | Sondeos | HTTP 200 | Errores | Disponibilidad | Vuelta a rotación |
-|---|---|---|---|---|---|---|
-| | | | | | | |
-
-Guarda la salida del monitor y la del host en
-`PoCs/evidencias/poc3-chaos-cliente-<fecha>.txt` y
-`PoCs/evidencias/poc3-chaos-host-<fecha>.txt`.
-
-**Qué deberías observar:** la mayoría de los sondeos siguen siendo `HTTP 200`
-con `app2`/`app3`; los errores se concentran en la ventana de convergencia de
-HAProxy. El nodo vuelve a la rotación cuando se restaura.
 
 ### Resultados obtenidos (26-10-2026)
 
@@ -642,20 +593,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-StackHealth.ps1
 Si el problema persiste, revisa los logs del servicio con
 `docker logs <servicio>` y consulta la sección de diagnóstico de
 [Ejecución en Windows](#ejecución-en-windows).
-
-## Dónde guardar los resultados
-
-Los resultados de la ejecución del **25 y 26 de octubre de 2026** están
-documentados en las secciones **Resultados obtenidos** de cada PoC. Las
-capturas originales se conservan en `PoCs/evidencias/`, que está excluida de
-Git salvo su propio README.
-
-Para repetir las pruebas, cada sección **Qué capturar** indica las columnas
-mínimas. Guarda:
-
-- la salida del **cliente** (HTTP, traza, req/s o disponibilidad),
-- la salida del **host** (qué se detuvo o pausó, tiempos y restauración),
-- la fecha, la IP del host y el nombre del cliente.
 
 ## Scripts de la demo
 

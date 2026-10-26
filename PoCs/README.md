@@ -17,7 +17,7 @@ El cliente no ejecuta Docker y el host no genera la carga. Los resultados de la
 | 2. Failover por capas | **3/3 PASS**; 115/120 sondeos `200` (**95.8 %**) |
 | 3. Caos | **69/70 sondeos `200`** (**98.6 %**), nodo restaurado |
 
-La descripción completa de cada PoC y sus tablas de captura están en el
+La descripción completa de cada PoC y sus resultados están en el
 [`README.md`](../README.md#cómo-se-ejecutan-las-poc).
 
 ## Topología

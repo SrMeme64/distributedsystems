@@ -19,12 +19,12 @@ Mejoras de resiliencia y operación implementadas durante la ejecución:
 - Sentinel monitorea la IP fija `172.32.0.11` para evitar `TILT` cuando Docker elimina el DNS del maestro detenido.
 - `REDIS_COMMAND_TIMEOUT_MS` (2 s): cada comando de caché tiene límite; si Redis no responde, el catálogo se lee de MariaDB.
 - Fallback del catálogo a MariaDB cuando Redis no está disponible; `POST /api/cache/clear` devuelve `503`.
-- `timeout check 4s` en HAProxy para que un Redis lento no marque caídos los tres backends API.
+- `timeout check 2s` en HAProxy para que un Redis lento no marque caídos los tres backends API.
 - La API arranca aunque MongoDB no esté disponible (conexión en segundo plano) y se reconecta automáticamente cuando el replica set vuelve.
 - `galera/entrypoint.sh`: detecta datos con `safe_to_bootstrap=0` y une `galera1` al clúster en lugar de negarse a arrancar.
 - `db-bootstrap` cicla `galera1,galera2,galera3` y reintenta `EAI_AGAIN`/`ENOTFOUND`.
-- Nagios con 23 hosts (proxysql, mongo1/2/3, redis-master/replica/sentinel).
-- Chaos Monkey con grupos `proxysql`, `mongodb`, `redis-data`, `redis-sentinel`; dashboard actualizado.
+- Nagios con 23 hosts: web1-3, app1-3, Galera 1-3, Mongo 1-3, Redis (maestro, 2 réplicas y 3 centinelas), los dos pares HAProxy y ProxySQL.
+- Chaos Monkey con grupos `web`, `app`, `presentation-lb`, `application-lb`, `galera`, `proxysql`, `mongodb`, `redis`, `redis-data` y `redis-sentinel`; dashboard actualizado.
 - PoC 1, 2 y 3 recreadas y documentadas con resultados en el README.
 
 ## Recuperación de Galera (si todos los nodos caen)
