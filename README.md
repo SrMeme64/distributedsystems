@@ -122,7 +122,7 @@ Maestro, dos réplicas y tres centinelas con quórum 2. La API se conecta a `red
 
 ## Acceso desde una segunda laptop
 
-El host ejecuta Docker Compose; la otra laptop actúa como **cliente de prueba**. El puerto 80 publicado por Docker se consume usando la IP LAN del host (ej. `http://192.168.1.50/`), no `localhost`.
+El host ejecuta Docker Compose; la otra laptop actúa como **cliente de prueba**. El puerto 80 publicado por Docker se consume usando la IP LAN del host (por ejemplo, en la ejecución del 26-10-2026 fue `http://192.168.1.72/`), no `localhost`. La IP puede cambiar entre sesiones: consúltela en el host con `ipconfig | findstr /i "IPv4"`.
 
 ### Cuándo se necesita el firewall
 
@@ -131,14 +131,14 @@ Docker publica el puerto 80 en `0.0.0.0` por defecto, por lo que el tráfico de 
 Para verificar conectividad desde el cliente:
 
 ```powershell
-Test-NetConnection 192.168.1.50 -Port 80
+Test-NetConnection <IP_HOST> -Port 80
 ```
 
 Si devuelve `False`, crea una regla restringida (sustituye las IP y el nombre de interfaz por los de tu red):
 
 ```powershell
-$hostIp = "192.168.1.50"
-$clienteIp = "192.168.1.25"
+$hostIp = "<IP_HOST>"
+$clienteIp = "<IP_CLIENTE>"
 $interfaz = "Wi-Fi"
 $perfil = (Get-NetConnectionProfile -InterfaceAlias $interfaz).NetworkCategory
 New-NetFirewallRule -DisplayName "Distributed Store HTTP test" -Direction Inbound -Protocol TCP -LocalPort 80 -LocalAddress $hostIp -RemoteAddress $clienteIp -InterfaceAlias $interfaz -Action Allow -Profile $perfil
@@ -180,90 +180,146 @@ docker compose --env-file .env.exam logs --tail 100 catalog-init db-bootstrap mo
 
 Keepalived corre en sidecars que comparten el namespace de red de cada HAProxy. Después de reconstruirlos o iniciarlos, confirma que los cuatro sidecars sigan activos en `docker compose ps`.
 
+### Después de reiniciar Docker Desktop
+
+Al reiniciar Docker Desktop pueden aparecer dos efectos que dejan `http://localhost/` sin respuesta aunque los contenedores figuren `Up`:
+
+1. **Galera no forma el clúster.** `galera1` queda en estado no-primario esperando pares, y `galera2`/`galera3` no arrancan por la dependencia del healthcheck. Si `docker compose up -d` termina con `dependency failed to start: container ...galera1... is unhealthy`, arranca los pares sin dependencias:
+
+   ```powershell
+   docker compose --env-file .env.exam up -d --no-deps galera2 galera3
+   docker exec distributed-three-tier-galera1-1 mariadb -u root -pchange-this-root-password -e "SHOW STATUS LIKE 'wsrep_cluster_size'; SHOW STATUS LIKE 'wsrep_cluster_status';"
+   ```
+
+   Espera `wsrep_cluster_size = 3` y `wsrep_cluster_status = Primary`.
+
+2. **Keepalived pierde la interfaz.** En los logs aparece `Netlink reports eth0 down` o `Interface name has changed from eth0 to veth...` y el proceso entra en `FAULT STATE`; sin VIP, `presentation-entry` devuelve `curl: (52) Empty reply from server`. Reinicia los cuatro sidecars:
+
+   ```powershell
+   docker restart distributed-three-tier-presentation-keepalived-master-1 distributed-three-tier-presentation-keepalived-backup-1 distributed-three-tier-application-keepalived-master-1 distributed-three-tier-application-keepalived-backup-1
+   ```
+
+   Verifica con `curl.exe -sS http://localhost/api/health`; debe responder `200` con `x-request-trace`.
+
 Para detener sin borrar datos: `docker compose --env-file .env.exam down`. Para borrar volúmenes: `docker compose --env-file .env.exam down -v` (destructivo). Redis no tiene volúmenes de persistencia: al recrear sus contenedores la caché arranca vacía.
 
 ## PoC 1: Prueba de carga
 
-**Objetivo:** medir la respuesta del catálogo bajo concurrencia.
+**Objetivo:** medir latencia y throughput del catálogo con caché fría y caliente, y observar el punto de saturación de las tres réplicas API.
 
-Desde el cliente (sustituye la IP por la del host):
+**Herramienta:** ApacheBench (`ab`) dentro de un contenedor `httpd:alpine` conectado a la red `edge`. No hace falta instalar `ab` en el host ni en el cliente.
 
-```powershell
-$baseUrl = "http://192.168.1.50"
-ab -n 500 -c 20 "$baseUrl/api/products/cheapest"
-```
-
-Para medir caché fría:
+**En el host**, desde la raíz del repositorio:
 
 ```powershell
-$baseUrl = "http://192.168.1.50"
-Invoke-RestMethod -Method Post -Uri "$baseUrl/api/cache/clear"
-ab -n 1 -c 1 "$baseUrl/api/products/cheapest"
-ab -n 500 -c 20 "$baseUrl/api/products/cheapest"
+# 1. Vaciar la caché de Redis
+curl.exe -sS -o NUL -w "cache_clear HTTP %{http_code}`n" -X POST http://localhost/api/cache/clear
+
+# 2. Caché fría: la primera solicitud va a MariaDB y escribe en Redis
+docker run --rm --network distributed-three-tier_edge httpd:alpine `
+  ab -n 1 -c 1 http://presentation-entry/api/products/cheapest
+
+# 3. Caché caliente con tres niveles de concurrencia
+docker run --rm --network distributed-three-tier_edge httpd:alpine `
+  ab -n 500 -c 10 http://presentation-entry/api/products/cheapest
+docker run --rm --network distributed-three-tier_edge httpd:alpine `
+  ab -n 500 -c 20 http://presentation-entry/api/products/cheapest
+docker run --rm --network distributed-three-tier_edge httpd:alpine `
+  ab -n 500 -c 50 http://presentation-entry/api/products/cheapest
 ```
 
-Si no tienes `ab`, usa JMeter con un grupo de hilos, el endpoint `GET /api/products/cheapest`, 20 usuarios y 500 iteraciones.
+**Desde el cliente**, si prefiere ejecutar `ab` localmente, sustituya `http://presentation-entry` por `http://<IP_HOST>` (por ejemplo `http://192.168.1.72`). La IP del host cambia entre sesiones: consúltela con `ipconfig | findstr /i "IPv4"`.
 
-**Resultados (23-10-2026):**
+**Resultados (26-10-2026, host `192.168.1.72`):**
 
-| Escenario | Solicitudes | Fallidas | Req/s | Tiempo medio |
-|---|---|---|---|---|
-| Caché fría | 1 | 0 | 107.60 | 9.294 ms |
-| Caché caliente | 500 | 0 | 1447.22 | 13.820 ms |
+| Escenario | Solicitudes | Concurrencia | Fallidas | Req/s | Tiempo medio |
+|---|---|---|---|---|---|
+| Caché fría (Redis vacío) | 1 | 1 | 0 | 33.53 | 29.821 ms |
+| Caché caliente | 500 | 10 | 0 | 870.70 | 11.485 ms |
+| Caché caliente | 500 | 20 | 0 | 1021.77 | 19.574 ms |
+| Caché caliente | 500 | 50 | 0 | 946.70 | 52.815 ms |
+
+**Lectura:** el impacto de la caché es claro: la primera solicitud tarda 29.8 ms porque consulta MariaDB y escribe en Redis; con la caché caliente la latencia baja a ~11 ms. El throughput se estabiliza alrededor de **1 000 req/s** con tres réplicas API: subir la concurrencia de 20 a 50 no aumenta las solicitudes por segundo y sí multiplica la latencia (19.6 ms → 52.8 ms). El cuello de botella está en las réplicas API y el balanceo, no en Redis. Para escalar hay que agregar réplicas API y revisar que `N × DB_POOL_SIZE` siga dentro de los límites de ProxySQL y MariaDB (mejora 7).
 
 ## PoC 2: Failover simple
 
-**Objetivo:** comprobar que HAProxy de aplicación deja de enviar tráfico a un nodo API detenido.
+**Objetivo:** comprobar que HAProxy de aplicación retira un nodo API detenido y sigue atendiendo con los nodos restantes.
 
-**Desde el cliente:**
+**Paso 1 — En el cliente**, medir la línea base (tres sondeos):
 
 ```powershell
-$baseUrl = "http://192.168.1.50"
-curl.exe -i "$baseUrl/api/health"
+$baseUrl = "http://192.168.1.72"
+1..3 | ForEach-Object {
+    curl.exe -sS -i "$baseUrl/api/health" |
+        Select-String -Pattern "^HTTP/|^x-request-trace:"
+    Start-Sleep -Milliseconds 500
+}
 ```
 
-**En el host, detén un nodo API:**
+**Paso 2 — En el host**, detener `app1`:
 
 ```powershell
 docker compose --env-file .env.exam stop app1
 ```
 
-**Desde el cliente, espera unos segundos y consulta de nuevo** (debe responder `200` con `app2` o `app3` en la traza):
+**Paso 3 — En el cliente**, sondear durante la convergencia (ocho sondeos, uno por segundo):
 
 ```powershell
-curl.exe -i "$baseUrl/api/health"
+1..8 | ForEach-Object {
+    curl.exe -sS -i --max-time 5 "$baseUrl/api/health" |
+        Select-String -Pattern "^HTTP/|^x-request-trace:"
+    Start-Sleep -Seconds 1
+}
 ```
 
-**En el host, recupera el servicio:**
+**Paso 4 — En el host**, recuperar el nodo:
 
 ```powershell
 docker compose --env-file .env.exam start app1
 ```
 
-**Desde el cliente, confirma que volvió a responder:**
+**Paso 5 — En el cliente**, confirmar que `app1` vuelve a la rotación:
 
 ```powershell
-curl.exe -i "$baseUrl/api/health"
+1..6 | ForEach-Object {
+    curl.exe -sS -i "$baseUrl/api/health" |
+        Select-String -Pattern "^HTTP/|^x-request-trace:"
+    Start-Sleep -Milliseconds 700
+}
 ```
 
-**Criterio de éxito:** HTTP 200 durante la caída, atendido por los nodos restantes; el nodo detenido se puede iniciar de nuevo.
+**Resultados (26-10-2026):**
 
-**Resultados (23-10-2026):**
-- Baseline: `HTTP 200`, traza `app2`.
-- Con `app1` detenido: 3 solicitudes `HTTP 200`, trazas `app3`, `app2`, `app3`.
-- Tras recuperar `app1`: `HTTP 200`, traza `app1`.
+| Fase | Resultado |
+|---|---|
+| Línea base (3 sondeos) | 3/3 `HTTP 200`; trazas `app3`, `app1`, `app2` (rotación completa) |
+| Convergencia (8 sondeos, 1 s) | 6/8 `HTTP 200`; 2 timeouts de ~5 s en los primeros 8 s |
+| Estado estable con `app1` caído (10 sondeos) | 10/10 `HTTP 200`, atendidos solo por `app2` y `app3` |
+| Tras recuperar `app1` (6 sondeos) | 6/6 `HTTP 200`; vuelve la rotación `app1`, `app2`, `app3` |
 
-## PoC 3: Chaos Engineering 
+**Lectura:** HAProxy retira el nodo caído y el servicio sigue disponible con las réplicas restantes. Hay una ventana transitoria de unos 8 s (el intervalo de health check) en la que las solicitudes que aún se enrutan a `app1` terminan en timeout. No es un failover sin interrupción: es un failover con errores transitorios acotados a la convergencia.
 
+## PoC 3: Chaos Engineering
 
-Inyecta una falla controlada en una réplica API y comprueba que el servicio mantiene disponibilidad:
+**Objetivo:** inyectar una falla aleatoria en una réplica API durante 15 s y medir la disponibilidad desde el cliente con un monitor continuo.
+
+**Paso 1 — En el cliente**, abrir una terminal y lanzar el monitor (70 sondeos cada 500 ms, ~35 s):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Monitor-LanHealth.ps1 `
+  -HostIPv4 "192.168.1.72" -RequestCount 70 -IntervalMilliseconds 500
+```
+
+> `-ExecutionPolicy Bypass` solo aplica a esa invocación; no cambia la política del equipo. Si el monitor se ejecuta en el host, use `-HostIPv4 "127.0.0.1"`.
+
+**Paso 2 — En el host**, en otra terminal, inyectar la falla en un nodo aleatorio:
 
 ```powershell
 $target = Get-Random -InputObject @("app1", "app2", "app3")
 Write-Host "Nodo seleccionado: $target"
 docker compose --env-file .env.exam stop $target
 try {
-    Write-Host "Falla inyectada por 15 segundos; ejecutar sondeos desde el cliente."
+    Write-Host "Falla inyectada por 15 segundos; el monitor del cliente sigue sondeando."
     Start-Sleep -Seconds 15
 }
 finally {
@@ -271,8 +327,35 @@ finally {
 }
 ```
 
-Durante la ventana, ejecuta comprobaciones desde el cliente: `curl.exe -i http://<IP_HOST>/api/health`.
+**Paso 3 — En el host**, confirmar que el nodo volvió:
+
+```powershell
+docker compose --env-file .env.exam ps --format "table {{.Service}}\t{{.Status}}" |
+  Select-String -Pattern "app1|app2|app3"
+curl.exe -sS http://localhost/api/health
+```
+
+**Resultados (26-10-2026):**
+
+| Métrica | Valor |
+|---|---|
+| Nodo objetivo (aleatorio) | `app1` |
+| Ventana de falla | 19:26:10 → 19:26:26 (15 s) |
+| Sondeos totales | 70 |
+| `HTTP 200` | 68 (97.1 %) |
+| Timeouts | 2 (19:26:12.760 y 19:26:18.425) |
+| Distribución con `app1` caído | `app3` 28, `app2` 28, `app1` 12 (antes y después de la falla) |
+| Retorno de `app1` a la rotación | 19:26:47 (~21 s tras reiniciarlo) |
+| Estado final | `/api/health` `200 {"status":"ok"}`; tres réplicas `Up` |
+
+**Lectura:** el servicio nunca dejó de responder por completo: 68 de 70 sondeos fueron `200` y los dos fallos coinciden con la ventana de convergencia de HAProxy. El experimento valida **resiliencia** (el sistema sobrevive a la pérdida de una réplica) y **alta disponibilidad** (las réplicas restantes absorben el tráfico), pero no garantiza cero errores: la ventana de detección del nodo caído produce timeouts transitorios. Para reducirla habría que acortar `inter`/`fall` en HAProxy o añadir reintentos en el cliente.
 
 ## Documentación y evidencias
 
-Este README y los archivos Markdown del repositorio constituyen la documentación del proyecto. La capa de datos, los modos de falla y los resultados del 23-10-2026 están descritos en las secciones anteriores. El equipo debe completar los espacios pendientes con el diagrama JPG exportado y las evidencias de las PoC de carga y Chaos Monkey antes de presentar esos resultados como ejecutados.
+Las tres PoC se ejecutaron el **26-10-2026** sobre el host `192.168.1.72` con el stack completo y `/api/health` en `200 {"status":"ok"}` antes y después de cada prueba. Los resultados medidos están en las tablas de las secciones anteriores.
+
+- **PoC 1:** ApacheBench dentro de `httpd:alpine` en la red `edge`; 0 solicitudes fallidas en los cuatro escenarios.
+- **PoC 2:** 3/3 `200` en la línea base, 6/8 durante la convergencia y 10/10 con `app1` caído; `app1` volvió a la rotación al reiniciarse.
+- **PoC 3:** 68/70 `200` (97.1 %) durante la inyección de falla; la salida cruda del monitor está en [`PoCs/evidencias/poc3-chaos-monitor-2026-10-26.txt`](PoCs/evidencias/poc3-chaos-monitor-2026-10-26.txt).
+
+Los scripts reutilizables y las instrucciones de ejecución desde una laptop externa, incluido el firewall, están en [`PoCs/README.md`](PoCs/README.md).

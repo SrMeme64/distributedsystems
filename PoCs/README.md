@@ -5,7 +5,12 @@ contra el host Docker. Describe una prueba realizada y ofrece scripts para
 repetirla; no significa que las pruebas futuras o las evoluciones opcionales
 del proyecto ya se hayan ejecutado.
 
-## Topología comprobada
+Los resultados de las PoC 1-3 (carga, failover de API y Chaos Engineering)
+ejecutadas el 26-10-2026 están en el [`README.md`](../README.md). Esta carpeta
+cubre además el failover de los HAProxy master/backup de presentación y
+aplicación.
+
+## Topología comprobada (22-10-2026)
 
 - Host Docker: `192.168.1.69`, conectado por Wi-Fi.
 - Cliente LAN: `192.168.1.68`.
@@ -14,7 +19,11 @@ del proyecto ya se hayan ejecutado.
   solo envió solicitudes HTTP.
 - Nagios permanece enlazado a `127.0.0.1:8088`; no forma parte de esta PoC LAN.
 
-## Resultados de esta ejecución
+Las IP pueden cambiar entre sesiones. Antes de repetir la prueba, obtén la IP
+actual del host con `ipconfig | findstr /i "IPv4"` y sustituye los valores de
+los comandos.
+
+## Resultados de la ejecución del 22-10-2026
 
 - Desde el cliente, `Test-NetConnection 192.168.1.69 -Port 80` informó
   `TcpTestSucceeded: True`.
@@ -33,7 +42,7 @@ del proyecto ya se hayan ejecutado.
 
 ## Firewall del host
 
-Durante esta PoC se creó y verificó una regla de entrada para TCP/80 con este
+Durante la PoC del 22-10-2026 se creó y verificó una regla de entrada para TCP/80 con este
 alcance:
 
 - Dirección local: `192.168.1.69`.
