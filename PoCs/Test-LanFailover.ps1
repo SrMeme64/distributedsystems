@@ -13,7 +13,7 @@ param(
     [string]$ComposeEnvFile = ".env.exam"
 )
 
-$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $envFilePath = Join-Path $repositoryRoot $ComposeEnvFile
 if (-not (Test-Path -LiteralPath $envFilePath -PathType Leaf)) {
     throw "No se encontro el archivo de entorno de Compose: $envFilePath"

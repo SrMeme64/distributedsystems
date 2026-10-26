@@ -335,8 +335,14 @@ docker compose --env-file .env.exam stop app1
 **Paso 4 — En el host**, recuperar el nodo:
 
 ```powershell
-docker compose --env-file .env.exam start app1
+docker compose --env-file .env.exam up -d --no-deps app1
+docker compose --env-file .env.exam ps app1
 ```
+
+`up -d --no-deps` arranca solo `app1`. `docker compose start` también relanza
+`db-bootstrap`, `mongo-init` y `catalog-init`, lo que alarga la prueba sin
+aportar nada. Espera ~8 s antes de sondear: HAProxy necesita dos chequeos
+correctos (`rise 2`) para devolverlo a la rotación.
 
 **Paso 5 — En el cliente**, confirmar que `app1` vuelve a la rotación:
 
@@ -375,17 +381,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Monitor-LanHealth.ps1
 **Paso 2 — En el host**, en otra terminal, inyectar la falla en un nodo aleatorio:
 
 ```powershell
-$target = Get-Random -InputObject @("app1", "app2", "app3")
-Write-Host "Nodo seleccionado: $target"
-docker compose --env-file .env.exam stop $target
-try {
-    Write-Host "Falla inyectada por 15 segundos; el monitor del cliente sigue sondeando."
-    Start-Sleep -Seconds 15
-}
-finally {
-    docker compose --env-file .env.exam start $target
-}
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-ChaosTest.ps1 `
+  -HoldSeconds 15
 ```
+
+El script elige un nodo al azar, lo detiene 15 s y **siempre** lo restaura en un
+bloque `finally` (incluso si pulsas `Ctrl+C`). Después espera a que HAProxy lo
+marque `UP` y lo confirma con la línea `Server application_nodes/appN is UP`.
+
+Si prefieres controlar el nodo:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-ChaosTest.ps1 `
+  -Target app2 -HoldSeconds 15
+```
+
+Para revisar sin tocar nada: añade `-WhatIf`.
 
 **Paso 3 — En el host**, confirmar que el nodo volvió:
 

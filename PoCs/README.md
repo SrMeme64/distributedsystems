@@ -170,9 +170,13 @@ $ok = 0; $err = 0
 En el **host**, recupera el nodo:
 
 ```powershell
-docker compose --env-file .env.exam start app1
+docker compose --env-file .env.exam up -d --no-deps app1
 docker compose --env-file .env.exam ps app1
 ```
+
+Usa `up -d --no-deps` en lugar de `start`: `start` también vuelve a lanzar los
+servicios de inicialización (`db-bootstrap`, `mongo-init`, `catalog-init`), lo
+que alarga la prueba sin aportar nada.
 
 `ps app1` debe mostrar `Up`. HAProxy necesita dos chequeos correctos
 (`rise 2`, intervalo de 2 s) antes de devolverlo a la rotación, así que espera
@@ -214,16 +218,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Monitor-LanHealth.ps1
 Mientras el monitor imprime líneas, en el **host** inyecta la falla:
 
 ```powershell
-$target = Get-Random -InputObject @("app1", "app2", "app3")
-Write-Host "Nodo seleccionado: $target"
-docker compose --env-file .env.exam stop $target
-try {
-    Start-Sleep -Seconds 15
-}
-finally {
-    docker compose --env-file .env.exam start $target
-}
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-ChaosTest.ps1 `
+  -HoldSeconds 15
 ```
+
+El script elige un nodo al azar, lo detiene 15 s y **siempre** lo restaura en un
+bloque `finally`, incluso si pulsas `Ctrl+C`. Luego espera a que HAProxy lo
+marque `UP`. Usa `-Target app2` para fijar el nodo y `-WhatIf` para revisar sin
+cambios.
 
 **Cómo verificar:** al final, el monitor imprime una línea como
 `Resumen: 70 solicitudes, 68 HTTP 200, 2 errores, 97.1 % disponible`. Un valor
@@ -323,3 +325,4 @@ cambiar entre sesiones.
 | `Monitor-LanHealth.ps1` | Monitoriza la API del host desde el cliente, imprimiendo HTTP status, traza y un resumen final de disponibilidad. |
 | `Invoke-LoadTest.ps1` | Genera carga HTTP desde el cliente sin instalar `ab`: solicitudes, concurrencia, req/s, latencias p50/p95/p99 y códigos HTTP. |
 | `Test-LanFailover.ps1` | Pausa el HAProxy master de la capa indicada, espera el failover al backup y luego recupera el master. |
+| `Invoke-ChaosTest.ps1` | Detiene un nodo API aleatorio (o `-Target`) durante `-HoldSeconds` y lo restaura siempre en un bloque `finally`, verificando que HAProxy lo marque `UP`. |
