@@ -6,9 +6,16 @@ Scripts para ejecutar las tres PoC del proyecto desde una laptop externa
 - el **cliente** genera las solicitudes HTTP y captura los resultados;
 - el **host** ejecuta el script que provoca la falla y la restaura.
 
-El cliente no ejecuta Docker y el host no genera la carga. Esta carpeta no
-guarda resultados: las capturas las hace el operador durante la demo (ver
-[Evidencias](#evidencias)).
+El cliente no ejecuta Docker y el host no genera la carga. Los resultados de la
+última ejecución están documentados en el
+[`README.md`](../README.md#resultados-principales) y las capturas se guardan en
+[`evidencias/`](evidencias/), excluida de Git salvo su propio README.
+
+| PoC | Resultado |
+|---|---|
+| 1. Carga | 500 solicitudes, concurrencia 20: **457.25 req/s**, 0 errores |
+| 2. Failover por capas | **3/3 PASS**; 115/120 sondeos `200` (**95.8 %**) |
+| 3. Caos | **69/70 sondeos `200`** (**98.6 %**), nodo restaurado |
 
 La descripción completa de cada PoC y sus tablas de captura están en el
 [`README.md`](../README.md#cómo-se-ejecutan-las-poc).
@@ -249,6 +256,15 @@ Guarda tus capturas en `PoCs/evidencias/`. Esa carpeta está excluida de Git
 salvo su propio `README.md`, así que puedes pegar texto, CSV o capturas sin
 ensuciar el repositorio. La convención de nombres está en
 [`evidencias/README.md`](evidencias/README.md).
+
+Capturas de la ejecución del 26-10-2026:
+
+- `poc1-carga-cliente-2026-10-26.jpeg` y `poc1-carga-host-2026-10-26.jpeg`
+- `poc2-failover-cliente-2026-10-26.txt` y `poc2-failover-host-2026-10-26.txt`
+- `poc3-chaos-cliente-2026-10-26.txt` y `poc3-chaos-host-2026-10-26.txt`
+
+Los resultados de las tres PoC están resumidos en el
+[`README.md`](../README.md#resultados-principales).
 
 ## Si Windows bloquea los scripts
 

@@ -1,11 +1,50 @@
 # Sistema distribuido de tres capas
 
-Proyecto académico para la materia **Sistemas Distribuidos**. Tienda web distribuida
-con balanceo en presentación y aplicación, almacenamiento relacional y NoSQL, y
-caché de catálogo.
+Tienda web distribuida desarrollada para la materia **Sistemas Distribuidos**
+(Tarea #995). El sistema separa presentación, aplicación y datos, y combina
+balanceo activo/backup, bases de datos replicadas y caché con failover
+automático.
 
-**Integrantes:** Javier Rodriguez Rodriguez y Adriana Dzib De la Rosa  
-**Docente:** Ismael Jiménez Sánchez — **Tarea:** #995
+**Autores:** Javier Rodriguez Rodriguez y Adriana Dzib De la Rosa  
+**Docente:** Ismael Jiménez Sánchez
+
+Este repositorio reúne el diseño, la implementación y la validación del
+proyecto. **Javier y Adriana realizamos el trabajo en conjunto**: la
+arquitectura, la configuración de los servicios y las pruebas de carga,
+failover y caos que se documentan más abajo. Las pruebas se ejecutaron el
+**25 y 26 de octubre de 2026** desde una segunda laptop (cliente) contra el
+host Docker, para comprobar el comportamiento real sobre la LAN y no solo en
+`localhost`.
+
+## Contenido
+
+- [Resultados principales](#resultados-principales)
+- [Arquitectura](#arquitectura)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Capa de datos](#capa-de-datos)
+- [Acceso desde una segunda laptop](#acceso-desde-una-segunda-laptop)
+- [Ejecución en Windows](#ejecución-en-windows)
+- [Cómo se ejecutan las PoC](#cómo-se-ejecutan-las-poc)
+- [PoC 1: prueba de carga](#poc-1-prueba-de-carga-desde-el-cliente)
+- [PoC 2: failover por capas](#poc-2-failover-por-capas)
+- [PoC 3: Chaos Engineering](#poc-3-chaos-engineering)
+- [Apagado y arranque](#apagado-y-arranque)
+- [Dónde guardar los resultados](#dónde-guardar-los-resultados)
+- [Scripts de la demo](#scripts-de-la-demo)
+- [Créditos](#créditos)
+
+## Resultados principales
+
+| PoC | Escenario | Resultado |
+|---|---|---|
+| 1 | Carga del catálogo: 500 solicitudes, concurrencia 20 | **457.25 req/s**, 41.672 ms de media, **0 errores** |
+| 2 | Failover de API, presentación y aplicación | **3/3 PASS**; 115/120 sondeos `200` (**95.8 %**) |
+| 3 | Caos: nodo API aleatorio durante 15 s | **69/70 sondeos `200`** (**98.6 %**), nodo restaurado |
+
+Los detalles, tablas y lecturas de cada prueba están en las secciones
+[PoC 1](#poc-1-prueba-de-carga-desde-el-cliente),
+[PoC 2](#poc-2-failover-por-capas) y
+[PoC 3](#poc-3-chaos-engineering).
 
 ## Arquitectura
 
@@ -73,6 +112,21 @@ Las 7 mejoras solicitadas están implementadas y verificadas:
 | 5 | Proxy DB-aware | ✅ Implementado y verificado |
 | 6 | Enrutamiento lectura/escritura en Galera | ✅ Implementado y verificado |
 | 7 | Límites del pool al escalar réplicas | ✅ Implementado y verificado |
+
+## Estructura del repositorio
+
+| Ruta | Contenido |
+|---|---|
+| `docker-compose.yml` | Servicios, redes, volúmenes, healthchecks y políticas de reinicio. |
+| `application/` | API Node.js: catálogo, reseñas, salud y caché. |
+| `web/` | Nginx y contenido de la tienda. |
+| `haproxy/` y `keepalived/` | Balanceo master/backup y VIP de presentación y aplicación. |
+| `galera/`, `proxysql/`, `mongo/` y `redis/` | Configuración de la capa de datos. |
+| `database/` | Script de inicialización del catálogo. |
+| `nagios/` | Monitoreo local del stack. |
+| `PoCs/` | Scripts de las tres pruebas y convención de evidencias. |
+| `Start-Stack.ps1` / `Stop-Stack.ps1` | Arranque y apagado ordenado. |
+| `Install-AutoStart.ps1` | Arranque automático al iniciar sesión. |
 
 ## Capa de datos
 
@@ -321,6 +375,22 @@ caliente baja la latencia y sube el throughput. Al aumentar la concurrencia, el
 throughput se estabiliza y la latencia sube: el cuello de botella está en las
 réplicas API y el balanceo, no en Redis.
 
+### Resultados obtenidos (26-10-2026)
+
+Medición desde el cliente `PC-Principal` contra `http://192.168.1.72`, después
+de vaciar la caché en el host (`cache_clear HTTP 200`):
+
+| Escenario | Solicitudes | Concurrencia | Duración | Req/s | Media | p50 | p95 | p99 | Errores |
+|---|---|---|---|---|---|---|---|---|---|
+| Caché fría | 1 | 1 | 0.077 s | 13.02 | 48.172 ms | 48.172 ms | 48.172 ms | 48.172 ms | 0 |
+| Caché caliente | 500 | 20 | 1.094 s | 457.25 | 41.672 ms | 16.110 ms | 87.995 ms | 493.838 ms | 0 |
+
+Los 500 códigos de la prueba caliente fueron `200` y no hubo solicitudes
+fallidas. La caché caliente multiplicó por ~35 el throughput y bajó la mediana
+de 48 ms a 16 ms. El p99 de 494 ms muestra que, con concurrencia 20, algunas
+solicitudes esperan turno en las réplicas API; aun así el servicio no devolvió
+errores.
+
 ## PoC 2: failover por capas
 
 **Objetivo:** comprobar, desde el cliente, que el sistema sigue respondiendo
@@ -396,6 +466,27 @@ Archivos sugeridos:
 timeouts; después el servicio sigue respondiendo con las réplicas o el backup.
 El cliente no cambia de URL: siempre usa `http://<IP_HOST>/api/health`.
 
+### Resultados obtenidos (26-10-2026)
+
+**Línea base** (120 sondeos entre 23:54:44 y 23:55:47): **120/120 `HTTP 200`**,
+0 errores y **100 %** de disponibilidad. Todas las trazas pasaron por
+`presentation-lb-master` y `application-lb-master`, con rotación por `app1`,
+`app2` y `app3`.
+
+**Ventana de failover** (120 sondeos entre 23:56:19 y 23:57:42):
+
+| Fase | Acción del host | Métrica del host | Lo que vio el cliente | Errores | Resultado |
+|---|---|---|---|---|---|
+| API (`app1`) | detenido 12 s | `DOWN` en 6.46 s; `UP` en 16.16 s | siguió respondiendo por `app2`/`app3` | 1 | PASS |
+| Presentación | `presentation-lb-master` pausado | failover 10.37 s; failback 3.46 s | `presentation-lb-backup` a los 7.9 s; master 1.4 s después del *unpause* | 2 | PASS |
+| Aplicación | `application-lb-master` pausado | failover 10.33 s; failback 4.35 s | `application-lb-backup` a los 7.9 s; master 1.9 s después del *unpause* | 2 | PASS |
+
+Total de la ventana: **115/120 `HTTP 200`**, 5 timeouts y **95.8 %** de
+disponibilidad. **Resultado global: PASS.** Los 5 timeouts se repartieron
+1 + 2 + 2 entre las tres fases; cada uno correspondió a una solicitud en curso
+durante la convergencia y el monitor volvió a recibir `200` en el siguiente
+sondeo exitoso. La URL del cliente no cambió en ningún momento.
+
 ## PoC 3: Chaos Engineering
 
 **Objetivo:** inyectar una falla aleatoria en una réplica API durante 15 s y
@@ -446,6 +537,25 @@ Guarda la salida del monitor y la del host en
 **Qué deberías observar:** la mayoría de los sondeos siguen siendo `HTTP 200`
 con `app2`/`app3`; los errores se concentran en la ventana de convergencia de
 HAProxy. El nodo vuelve a la rotación cuando se restaura.
+
+### Resultados obtenidos (26-10-2026)
+
+| Dato | Valor |
+|---|---|
+| Nodo elegido al azar | `app1` |
+| Ventana de falla | 15 s (00:00:26.688 → 00:00:42.251) |
+| `DOWN` observado por HAProxy | 0.11 s |
+| Vuelta a rotación (`UP`) | 16.79 s |
+| Sondeos del cliente | 70 |
+| `HTTP 200` | 69 |
+| Timeouts | 1 |
+| Disponibilidad | **98.6 %** |
+| Resultado | **PASS** |
+
+El único timeout ocurrió al inicio de la falla (00:00:25.320). El monitor volvió
+a recibir `HTTP 200` 4.5 s después y se mantuvo sin errores el resto de la
+ventana, atendido por `app2` y `app3`. Al restaurar `app1`, HAProxy confirmó
+`Server application_nodes/app1 is UP` y el nodo volvió a la rotación.
 
 ## Apagado y arranque
 
@@ -535,17 +645,17 @@ Si el problema persiste, revisa los logs del servicio con
 
 ## Dónde guardar los resultados
 
-Este README **no incluye resultados**: los captura el operador durante la demo.
-Guarda las salidas en `PoCs/evidencias/`, que está excluida de Git salvo su
-propio README. Así puedes pegar texto, CSV o capturas sin ensuciar el
-repositorio.
+Los resultados de la ejecución del **25 y 26 de octubre de 2026** están
+documentados en las secciones **Resultados obtenidos** de cada PoC. Las
+capturas originales se conservan en `PoCs/evidencias/`, que está excluida de
+Git salvo su propio README.
 
-Para cada PoC, la sección **Qué capturar** indica las columnas mínimas. Lo
-importante es conservar:
+Para repetir las pruebas, cada sección **Qué capturar** indica las columnas
+mínimas. Guarda:
 
 - la salida del **cliente** (HTTP, traza, req/s o disponibilidad),
 - la salida del **host** (qué se detuvo o pausó, tiempos y restauración),
-- la fecha y la IP del host usada en esa ejecución.
+- la fecha, la IP del host y el nombre del cliente.
 
 ## Scripts de la demo
 
@@ -561,3 +671,10 @@ importante es conservar:
 | `Start-Stack.ps1` | Host | Arranque ordenado y verificación del stack. |
 | `Stop-Stack.ps1` | Host | Apagado ordenado antes de cerrar el equipo. |
 | `Install-AutoStart.ps1` | Host | Arranque automático al iniciar sesión. |
+
+## Créditos
+
+Diseño, implementación y pruebas: **Javier Rodriguez Rodriguez** y
+**Adriana Dzib De la Rosa**. Las tres PoC se ejecutaron en conjunto sobre el
+stack completo, con el cliente en una segunda laptop y el host a cargo de las
+fallas controladas. Docente: **Ismael Jiménez Sánchez** (Tarea #995).

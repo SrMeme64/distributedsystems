@@ -13,4 +13,5 @@ Sugerencia de nombres:
 - `poc3-chaos-host-<fecha>.txt`
 
 Cada PoC del [`README.md`](../README.md) tiene una sección **Qué capturar** con
-las columnas que conviene registrar.
+las columnas que conviene registrar. Los resultados de la ejecución del
+26-10-2026 están resumidos en el [`README.md`](../README.md#resultados-principales).
