@@ -203,6 +203,7 @@ services:
       REDIS_MASTER_NAME: mymaster
       APPLICATION_NODE: app1
     restart: always
+    stop_grace_period: 20s
     depends_on:
       catalog-init:
         condition: service_completed_successfully
@@ -216,6 +217,7 @@ services:
       <<: *application-environment
       APPLICATION_NODE: app2
     restart: always
+    stop_grace_period: 20s
     depends_on:
       catalog-init:
         condition: service_completed_successfully
@@ -229,6 +231,7 @@ services:
       <<: *application-environment
       APPLICATION_NODE: app3
     restart: always
+    stop_grace_period: 20s
     depends_on:
       catalog-init:
         condition: service_completed_successfully
@@ -352,6 +355,7 @@ services:
       retries: 12
       start_period: 30s
     restart: always
+    stop_grace_period: 45s
     depends_on:
       mongo-keyfile-init:
         condition: service_completed_successfully
@@ -389,6 +393,7 @@ services:
       retries: 12
       start_period: 30s
     restart: always
+    stop_grace_period: 45s
     depends_on:
       mongo-keyfile-init:
         condition: service_completed_successfully
@@ -428,6 +433,7 @@ services:
       retries: 12
       start_period: 30s
     restart: always
+    stop_grace_period: 45s
     depends_on:
       mongo-keyfile-init:
         condition: service_completed_successfully

@@ -27,3 +27,7 @@ backups/
 __pycache__/
 *.pyc
 
+# Capturas locales de las PoC: cada operador guarda sus resultados aqui.
+PoCs/evidencias/*
+!PoCs/evidencias/README.md
+

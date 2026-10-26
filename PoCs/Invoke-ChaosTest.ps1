@@ -13,8 +13,8 @@ param(
 
 # PoC 2/3: stop one API node, verify that HAProxy marks it DOWN while the other
 # two keep serving, then always restore it and verify that HAProxy marks it UP.
-# Run this on the host while the client runs Monitor-LanHealth.ps1 or
-# Invoke-ClientPocSuite.ps1. The finally block restores the node even on Ctrl+C.
+# Run this on the host while the client runs Monitor-LanHealth.ps1.
+# The finally block restores the node even on Ctrl+C.
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $envFilePath = Join-Path $repositoryRoot $ComposeEnvFile

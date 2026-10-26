@@ -1,8 +1,10 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Medium")]
 param(
-    [Parameter(Mandatory = $true)]
-    [ValidateSet("Presentation", "Application")]
-    [string]$Layer,
+    [ValidateSet("All", "Api", "Presentation", "Application")]
+    [string]$Layer = "All",
+
+    [ValidateSet("app1", "app2", "app3")]
+    [string]$Target = "app1",
 
     [ValidateRange(1, 300)]
     [int]$HoldSeconds = 12,
@@ -15,13 +17,21 @@ param(
     [string]$ComposeEnvFile = ".env.exam"
 )
 
-# PoC 4/5: pause the selected HAProxy master and verify that Keepalived moves
-# the VIP to the backup, then unpause it and verify the failback.
+# PoC 2: failover por capas.
 #
-# The master container is paused (not stopped) because the Keepalived sidecar
-# shares its network namespace. Pausing freezes HAProxy but keeps the namespace
-# and the VIP alive, so the sidecar can still demote itself and the backup can
-# take over.
+# Con -Layer All (valor por defecto) ejecuta, en este orden:
+#   1. Api          : detiene un nodo API y comprueba que HAProxy lo retira.
+#   2. Presentation : pausa presentation-lb-master y comprueba que Keepalived
+#                     mueve el VIP al backup.
+#   3. Application  : pausa application-lb-master y comprueba el mismo failover
+#                     en la capa de aplicacion.
+#
+# El cliente ejecuta Monitor-LanHealth.ps1 en paralelo para capturar la traza
+# X-Request-Trace y ver el cambio de master a backup y el regreso.
+#
+# Los HAProxy se PAUSAN, no se detienen: el sidecar Keepalived comparte su
+# network namespace y pausar conserva ese namespace para que el VIP pueda
+# migrar. Cada fase restaura lo que cambio, incluso con Ctrl+C.
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $envFilePath = Join-Path $repositoryRoot $ComposeEnvFile
@@ -29,12 +39,9 @@ if (-not (Test-Path -LiteralPath $envFilePath -PathType Leaf)) {
     throw "No se encontro el archivo de entorno de Compose: $envFilePath"
 }
 
-if ($Layer -eq "Presentation") {
-    $masterService = "presentation-lb-master"
-    $backupService = "presentation-lb-backup"
-} else {
-    $masterService = "application-lb-master"
-    $backupService = "application-lb-backup"
+$chaosScript = Join-Path $PSScriptRoot "Invoke-ChaosTest.ps1"
+if (-not (Test-Path -LiteralPath $chaosScript -PathType Leaf)) {
+    throw "No se encontro el script de caos: $chaosScript"
 }
 
 function Invoke-HealthProbe {
@@ -64,9 +71,11 @@ function Get-ContainerPaused {
 }
 
 function Set-MasterRunning {
-    # Idempotent: unpause the master if a previous run left it paused.
-    if (Get-ContainerPaused -Service $masterService) {
-        & docker compose --env-file $ComposeEnvFile unpause $masterService *> $null
+    # Idempotente: reanuda el master si una ejecucion anterior lo dejo pausado.
+    param([string]$MasterService)
+
+    if (Get-ContainerPaused -Service $MasterService) {
+        & docker compose --env-file $ComposeEnvFile unpause $MasterService *> $null
         return ($LASTEXITCODE -eq 0)
     }
     return $true
@@ -112,106 +121,202 @@ function Wait-ForTrace {
     } while ((Get-Date) -lt $Deadline)
 
     [pscustomobject]@{
-        Found    = ($null -ne $observedAt)
-        At       = $observedAt
-        Errors   = $errors
+        Found     = ($null -ne $observedAt)
+        At        = $observedAt
+        Errors    = $errors
         LastTrace = $lastTrace
     }
 }
 
-$masterPaused = $false
-$failover = $null
-$failback = $null
-$exitCode = 0
+function New-PhaseResult {
+    param(
+        [string]$Phase,
+        [string]$Status,
+        [string]$Detail
+    )
 
-try {
-    Push-Location $repositoryRoot
+    [pscustomobject]@{
+        Phase  = $Phase
+        Status = $Status
+        Detail = $Detail
+    }
+}
 
-    if (-not (Set-MasterRunning)) {
-        throw "No se pudo reanudar $masterService antes de la prueba."
+function Invoke-ApiPhase {
+    Write-Host ""
+    Write-Host "--- Fase 1/3: failover de nodo API ($Target) ---"
+
+    $null = Set-MasterRunning -MasterService "presentation-lb-master"
+    $null = Set-MasterRunning -MasterService "application-lb-master"
+
+    $arguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $chaosScript,
+        "-Target", $Target,
+        "-HoldSeconds", "$HoldSeconds",
+        "-ComposeEnvFile", $ComposeEnvFile
+    )
+    if ($WhatIfPreference) {
+        $arguments += "-WhatIf"
     }
 
-    $baselineDeadline = (Get-Date).AddSeconds($TransitionTimeoutSeconds)
-    $baseline = Wait-ForTrace -ExpectedBalancer $masterService -Deadline $baselineDeadline -Quiet
-    if (-not $baseline.Found) {
-        throw "Precondicion fallida: la API no responde por $masterService en $TransitionTimeoutSeconds s. Ultima traza: $($baseline.LastTrace)"
-    }
-    "Estado inicial: HTTP 200 $($baseline.LastTrace)"
-
-    $action = "Pausar $masterService durante la PoC y comprobar failover/failback"
-    if (-not $PSCmdlet.ShouldProcess($masterService, $action)) {
-        return
+    $output = & powershell @arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    foreach ($line in @($output)) {
+        Write-Host ([string]$line)
     }
 
-    $pauseStarted = Get-Date
-    & docker compose --env-file $ComposeEnvFile pause $masterService *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "No se pudo pausar $masterService (exit $LASTEXITCODE)."
-    }
-    $masterPaused = $true
-    "Master pausado: $($pauseStarted.ToString('HH:mm:ss.fff'))  $masterService"
-
-    $failover = Wait-ForTrace -ExpectedBalancer $backupService -Deadline $pauseStarted.AddSeconds($TransitionTimeoutSeconds)
-    if (-not $failover.Found) {
-        throw "No se observo HTTP 200 por $backupService antes del timeout ($TransitionTimeoutSeconds s)."
+    $text = (@($output) | ForEach-Object { [string]$_ }) -join "`n"
+    $down = "no observado"
+    if ($text -match "DOWN observado:\s*([0-9.,]+)\s*s") {
+        $down = "$($matches[1]) s"
     }
 
-    $failoverSeconds = [Math]::Round(($failover.At - $pauseStarted).TotalSeconds, 2)
-    "Failover observado en {0:N2} s con {1} error(es) de convergencia." -f $failoverSeconds, $failover.Errors
+    if ($WhatIfPreference) {
+        return New-PhaseResult -Phase "API $Target" -Status "SIN CAMBIOS" -Detail "WhatIf"
+    }
+    if ($exitCode -eq 0) {
+        return New-PhaseResult -Phase "API $Target" -Status "PASS" -Detail "DOWN $down"
+    }
+    return New-PhaseResult -Phase "API $Target" -Status "FAIL" -Detail "el script de caos devolvio exit $exitCode"
+}
 
-    $holdDeadline = $pauseStarted.AddSeconds($HoldSeconds)
-    while ((Get-Date) -lt $holdDeadline) {
-        $probe = Invoke-HealthProbe
-        $timestamp = Get-Date
-        if ($probe.Success) {
-            "{0} HTTP {1} {2}" -f $timestamp.ToString("HH:mm:ss.fff"), $probe.StatusCode, $probe.Trace
-        } else {
-            "{0} ERROR {1}" -f $timestamp.ToString("HH:mm:ss.fff"), $probe.Error
-        }
-        Start-Sleep -Seconds 1
+function Invoke-LbPhase {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Presentation", "Application")]
+        [string]$LayerName
+    )
+
+    if ($LayerName -eq "Presentation") {
+        $masterService = "presentation-lb-master"
+        $backupService = "presentation-lb-backup"
+    } else {
+        $masterService = "application-lb-master"
+        $backupService = "application-lb-backup"
     }
 
-    $unpauseStarted = Get-Date
-    & docker compose --env-file $ComposeEnvFile unpause $masterService *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "No se pudo reanudar $masterService (exit $LASTEXITCODE); revisa el contenedor."
-    }
+    Write-Host ""
+    Write-Host "--- Failover de $masterService -> $backupService ---"
+
     $masterPaused = $false
-    "Master reanudado: $($unpauseStarted.ToString('HH:mm:ss.fff'))  $masterService"
+    try {
+        if (-not (Set-MasterRunning -MasterService $masterService)) {
+            return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail "no se pudo reanudar el master antes de la prueba"
+        }
 
-    $failback = Wait-ForTrace -ExpectedBalancer $masterService -Deadline $unpauseStarted.AddSeconds($TransitionTimeoutSeconds)
-    if (-not $failback.Found) {
-        throw "No se observo el failback a $masterService antes del timeout ($TransitionTimeoutSeconds s)."
-    }
+        $baselineDeadline = (Get-Date).AddSeconds($TransitionTimeoutSeconds)
+        $baseline = Wait-ForTrace -ExpectedBalancer $masterService -Deadline $baselineDeadline -Quiet
+        if (-not $baseline.Found) {
+            return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail "la API no responde por el master; ultima traza: $($baseline.LastTrace)"
+        }
+        Write-Host "Estado inicial: HTTP 200 $($baseline.LastTrace)"
 
-    $failbackSeconds = [Math]::Round(($failback.At - $unpauseStarted).TotalSeconds, 2)
-    "Failback observado en {0:N2} s con {1} error(es) de convergencia." -f $failbackSeconds, $failback.Errors
+        $action = "Pausar $masterService durante la PoC y comprobar failover/failback"
+        if (-not $PSCmdlet.ShouldProcess($masterService, $action)) {
+            return New-PhaseResult -Phase $masterService -Status "SIN CAMBIOS" -Detail "WhatIf"
+        }
 
-    ""
-    "Resumen $Layer :"
-    "  Failover $masterService -> $backupService : {0:N2} s ({1} errores)" -f $failoverSeconds, $failover.Errors
-    "  Failback $backupService -> $masterService : {0:N2} s ({1} errores)" -f $failbackSeconds, $failback.Errors
-    "  Resultado: PASS"
-} catch {
-    $exitCode = 1
-    ""
-    "Resultado: FAIL - $($_.Exception.Message)"
-} finally {
-    if ($masterPaused) {
+        $pauseStarted = Get-Date
+        & docker compose --env-file $ComposeEnvFile pause $masterService *> $null
+        if ($LASTEXITCODE -ne 0) {
+            return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail "no se pudo pausar (exit $LASTEXITCODE)"
+        }
+        $masterPaused = $true
+        Write-Host "Master pausado: $($pauseStarted.ToString('HH:mm:ss.fff'))  $masterService"
+
+        $failover = Wait-ForTrace -ExpectedBalancer $backupService -Deadline $pauseStarted.AddSeconds($TransitionTimeoutSeconds)
+        if (-not $failover.Found) {
+            return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail "no se observo el backup antes del timeout"
+        }
+        $failoverSeconds = [Math]::Round(($failover.At - $pauseStarted).TotalSeconds, 2)
+        Write-Host ("Failover observado en {0:N2} s con {1} error(es) de convergencia." -f $failoverSeconds, $failover.Errors)
+
+        $holdDeadline = $pauseStarted.AddSeconds($HoldSeconds)
+        while ((Get-Date) -lt $holdDeadline) {
+            $probe = Invoke-HealthProbe
+            if ($probe.Success) {
+                "{0} HTTP {1} {2}" -f (Get-Date).ToString("HH:mm:ss.fff"), $probe.StatusCode, $probe.Trace
+            } else {
+                "{0} ERROR {1}" -f (Get-Date).ToString("HH:mm:ss.fff"), $probe.Error
+            }
+            Start-Sleep -Seconds 1
+        }
+
+        $unpauseStarted = Get-Date
         & docker compose --env-file $ComposeEnvFile unpause $masterService *> $null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "No se pudo reanudar $masterService automaticamente. Restauralo con: docker compose --env-file $ComposeEnvFile unpause $masterService"
-        } else {
-            $restore = Wait-ForTrace -ExpectedBalancer $masterService -Deadline (Get-Date).AddSeconds(15) -Quiet
-            if ($restore.Found) {
-                "Restaurado: $masterService vuelve a recibir trafico."
+            return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail "no se pudo reanudar el master"
+        }
+        $masterPaused = $false
+        Write-Host "Master reanudado: $($unpauseStarted.ToString('HH:mm:ss.fff'))  $masterService"
+
+        $failback = Wait-ForTrace -ExpectedBalancer $masterService -Deadline $unpauseStarted.AddSeconds($TransitionTimeoutSeconds)
+        if (-not $failback.Found) {
+            return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail "no se observo el failback antes del timeout"
+        }
+        $failbackSeconds = [Math]::Round(($failback.At - $unpauseStarted).TotalSeconds, 2)
+        Write-Host ("Failback observado en {0:N2} s con {1} error(es) de convergencia." -f $failbackSeconds, $failback.Errors)
+
+        return New-PhaseResult -Phase $masterService -Status "PASS" -Detail ("failover {0:N2} s, failback {1:N2} s" -f $failoverSeconds, $failbackSeconds)
+    } catch {
+        return New-PhaseResult -Phase $masterService -Status "FAIL" -Detail $_.Exception.Message
+    } finally {
+        if ($masterPaused) {
+            & docker compose --env-file $ComposeEnvFile unpause $masterService *> $null
+            if ($LASTEXITCODE -eq 0) {
+                $restore = Wait-ForTrace -ExpectedBalancer $masterService -Deadline (Get-Date).AddSeconds(15) -Quiet
+                if ($restore.Found) {
+                    Write-Host "Restaurado: $masterService vuelve a recibir trafico."
+                } else {
+                    Write-Warning "Se reanudo $masterService, pero la traza aun no lo confirma."
+                }
             } else {
-                Write-Warning "Se reanudo $masterService, pero la traza aun no lo confirma. Revisa docker logs distributed-three-tier-$masterService-1"
+                Write-Warning "No se pudo reanudar $masterService. Usa: docker compose --env-file $ComposeEnvFile unpause $masterService"
             }
         }
     }
-
-    Pop-Location
 }
 
-exit $exitCode
+$phases = switch ($Layer) {
+    "All" { @("Api", "Presentation", "Application") }
+    default { @($Layer) }
+}
+
+Push-Location $repositoryRoot
+try {
+    Write-Host "=== PoC 2: failover por capas ==="
+    Write-Host "Fases: $($phases -join ', ')"
+    Write-Host "Duracion de cada falla: $HoldSeconds s"
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($phase in $phases) {
+        switch ($phase) {
+            "Api" { $results.Add((Invoke-ApiPhase)) }
+            "Presentation" { $results.Add((Invoke-LbPhase -LayerName "Presentation")) }
+            "Application" { $results.Add((Invoke-LbPhase -LayerName "Application")) }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "=================================================================="
+    Write-Host "Resumen PoC 2"
+    foreach ($result in $results) {
+        Write-Host ("  [{0}] {1,-32} {2}" -f $result.Status, $result.Phase, $result.Detail)
+    }
+
+    $failed = @($results | Where-Object { $_.Status -eq "FAIL" })
+    $changed = @($results | Where-Object { $_.Status -ne "SIN CAMBIOS" })
+    Write-Host ""
+    if ($failed.Count -gt 0) {
+        Write-Host "Resultado global: FAIL ($($failed.Count) fase(s))"
+        exit 1
+    }
+    if ($changed.Count -eq 0) {
+        Write-Host "Resultado global: SIN CAMBIOS (-WhatIf)"
+        exit 0
+    }
+    Write-Host "Resultado global: PASS"
+    exit 0
+} finally {
+    Pop-Location
+}
