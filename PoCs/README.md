@@ -171,7 +171,22 @@ En el **host**, recupera el nodo:
 
 ```powershell
 docker compose --env-file .env.exam start app1
+docker compose --env-file .env.exam ps app1
 ```
+
+`ps app1` debe mostrar `Up`. HAProxy necesita dos chequeos correctos
+(`rise 2`, intervalo de 2 s) antes de devolverlo a la rotación, así que espera
+unos 8 s y confirma:
+
+```powershell
+Start-Sleep -Seconds 8
+docker logs --tail 30 distributed-three-tier-application-lb-master-1 2>&1 |
+    Select-String "app1 is UP"
+```
+
+Si `ps app1` sigue en `Exited`, usa `up -d app1` y revisa `docker logs
+distributed-three-tier-app1-1`. Un `Exited (0)` es una parada limpia; un
+`Exited (1)` o reinicios indican un fallo de la app.
 
 En el **cliente**, confirma que `app1` vuelve a la rotación:
 
