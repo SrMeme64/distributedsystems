@@ -1,12 +1,13 @@
 FROM alpine:3.21
 
-RUN apk add --no-cache keepalived busybox-extras
+RUN apk add --no-cache keepalived busybox-extras iproute2
 
 COPY check-haproxy.sh /usr/local/bin/check-haproxy.sh
-RUN chmod 0755 /usr/local/bin/check-haproxy.sh
+COPY keepalived-entrypoint.sh /usr/local/bin/keepalived-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/check-haproxy.sh /usr/local/bin/keepalived-entrypoint.sh
 
 ARG KEEPALIVED_CONFIG
-COPY ${KEEPALIVED_CONFIG} /etc/keepalived/keepalived.conf
-RUN chmod 0644 /etc/keepalived/keepalived.conf
+COPY ${KEEPALIVED_CONFIG} /etc/keepalived/keepalived.conf.template
+RUN chmod 0644 /etc/keepalived/keepalived.conf.template
 
-ENTRYPOINT ["sh", "-c", "rm -f /run/keepalived/keepalived.pid /run/keepalived/vrrp.pid /run/keepalived/checkers.pid; exec keepalived --dont-fork --log-console --use-file=/etc/keepalived/keepalived.conf"]
+ENTRYPOINT ["/usr/local/bin/keepalived-entrypoint.sh"]

@@ -79,6 +79,7 @@ services:
   web1:
     image: nginx:alpine
     hostname: webnode1
+    restart: unless-stopped
     volumes:
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web/site1:/usr/share/nginx/html:ro
@@ -93,6 +94,7 @@ services:
   web2:
     image: nginx:alpine
     hostname: webnode2
+    restart: unless-stopped
     volumes:
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web/site2:/usr/share/nginx/html:ro
@@ -107,6 +109,7 @@ services:
   web3:
     image: nginx:alpine
     hostname: webnode3
+    restart: unless-stopped
     volumes:
       - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web/site3:/usr/share/nginx/html:ro
@@ -597,7 +600,12 @@ services:
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "yes"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
       MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
+      GALERA_PEERS: "galera2 galera3"
+      GALERA_BOOTSTRAP_FALLBACK: "yes"
+      GALERA_PEER_WAIT_SECONDS: "30"
     entrypoint: ["/bin/bash", "/usr/local/bin/galera-entrypoint.sh"]
+    restart: unless-stopped
+    stop_grace_period: 60s
     volumes:
       - galera1-data:/bitnami/mariadb
       - ./galera/entrypoint.sh:/usr/local/bin/galera-entrypoint.sh:ro
@@ -619,11 +627,13 @@ services:
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "no"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
       MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
+    restart: unless-stopped
+    stop_grace_period: 60s
     volumes:
       - galera2-data:/bitnami/mariadb
     depends_on:
       galera1:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"$${MARIADB_ROOT_PASSWORD}\""]
       interval: 10s
@@ -642,11 +652,13 @@ services:
       MARIADB_GALERA_CLUSTER_BOOTSTRAP: "no"
       MARIADB_GALERA_MARIABACKUP_USER: mariabackup
       MARIADB_GALERA_MARIABACKUP_PASSWORD: ${MARIADB_BACKUP_PASSWORD:?Set MARIADB_BACKUP_PASSWORD in the Compose env file}
+    restart: unless-stopped
+    stop_grace_period: 60s
     volumes:
       - galera3-data:/bitnami/mariadb
     depends_on:
       galera1:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"$${MARIADB_ROOT_PASSWORD}\""]
       interval: 10s
@@ -658,6 +670,7 @@ services:
 
   nagios:
     image: jasonrivers/nagios:latest
+    restart: unless-stopped
     ports:
       - "127.0.0.1:8088:80"
     environment:

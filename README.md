@@ -176,32 +176,58 @@ docker compose --env-file .env.exam logs --tail 100 catalog-init db-bootstrap mo
 
 4. Accede a la tienda en `http://localhost/` y a la API en `http://localhost/api/health`.
 
-`galera1` usa `galera/entrypoint.sh` para decidir si arranca el clúster o se une a uno existente. Si hay datos y `safe_to_bootstrap=0`, el nodo se une al clúster en lugar de negarse a arrancar. Solo hace bootstrap cuando no hay datos o cuando fue el último en salir del componente primario. Si todos los nodos están detenidos y ninguno tiene `safe_to_bootstrap=1`, `mysqld` se niega a hacer bootstrap para no perder transacciones; en ese caso respalda los volúmenes y recupera la posición con `wsrep-recover` (ver ToDo.md).
+`galera1` usa `galera/entrypoint.sh` para decidir si arranca el clúster o se une a uno existente:
 
-Keepalived corre en sidecars que comparten el namespace de red de cada HAProxy. Después de reconstruirlos o iniciarlos, confirma que los cuatro sidecars sigan activos en `docker compose ps`.
+1. Si no hay datos, hace bootstrap de un clúster nuevo.
+2. Si `safe_to_bootstrap=1`, fue el último en salir del componente primario y puede hacer bootstrap.
+3. Si hay datos y ningún par responde como `Primary` en 30 s, fuerza el bootstrap (`MARIADB_GALERA_FORCE_SAFETOBOOTSTRAP=yes`). Así un apagado brusco del equipo no deja el clúster bloqueado.
+4. Si algún par ya es `Primary`, se une a ese clúster.
+
+`galera2` y `galera3` arrancan con `condition: service_started` y `restart: unless-stopped`, de modo que se unen solos en cuanto `galera1` es primario. Los tres nodos tienen `stop_grace_period: 60s` para favorecer un cierre limpio.
+
+> **Riesgo del bootstrap forzado:** `galera1` es el nodo de recuperación designado. Si su dato fuera más antiguo que el de un par, el bootstrap forzado perdería esas transacciones. En un solo host con los tres nodos detenidos a la vez esto no ocurre, porque los tres comparten el mismo instante de apagado. Si sospechas de datos divergentes, respalda los volúmenes y recupera la posición con `wsrep-recover` (ver `ToDo.md`) en lugar de confiar en el fallback.
+
+Keepalived corre en sidecars que comparten el namespace de red de cada HAProxy. `keepalived/keepalived-entrypoint.sh` busca la interfaz por su IP esperada, renderiza el config con el nombre actual y reinicia Keepalived si Docker la renombra (`eth0` → `veth...`). Si tras 60 s no encuentra la interfaz, el contenedor sale con error para que Docker lo recree y se reenganche al namespace del HAProxy.
 
 ### Después de reiniciar Docker Desktop
 
-Al reiniciar Docker Desktop pueden aparecer dos efectos que dejan `http://localhost/` sin respuesta aunque los contenedores figuren `Up`:
+Con la configuración actual **no hace falta reparar nada a mano**. Al reiniciar Docker Desktop o el equipo:
 
-1. **Galera no forma el clúster.** `galera1` queda en estado no-primario esperando pares, y `galera2`/`galera3` no arrancan por la dependencia del healthcheck. Si `docker compose up -d` termina con `dependency failed to start: container ...galera1... is unhealthy`, arranca los pares sin dependencias:
+1. Docker arranca solo todos los servicios con `restart: unless-stopped` (incluidos `web1`, `web2`, `web3` y `nagios`).
+2. `galera1` espera 30 s a un par `Primary`; si no lo hay, hace bootstrap y `galera2`/`galera3` se unen.
+3. Los sidecars de Keepalived detectan la interfaz y levantan el VIP sin intervención.
 
-   ```powershell
-   docker compose --env-file .env.exam up -d --no-deps galera2 galera3
-   docker exec distributed-three-tier-galera1-1 mariadb -u root -pchange-this-root-password -e "SHOW STATUS LIKE 'wsrep_cluster_size'; SHOW STATUS LIKE 'wsrep_cluster_status';"
-   ```
+Espera 60-90 s tras el reinicio y verifica:
 
-   Espera `wsrep_cluster_size = 3` y `wsrep_cluster_status = Primary`.
+```powershell
+docker compose --env-file .env.exam ps
+curl.exe -sS http://localhost/api/health
+docker exec distributed-three-tier-galera1-1 mariadb -u root -pchange-this-root-password -e "SHOW STATUS LIKE 'wsrep_cluster_size'; SHOW STATUS LIKE 'wsrep_cluster_status';"
+```
 
-2. **Keepalived pierde la interfaz.** En los logs aparece `Netlink reports eth0 down` o `Interface name has changed from eth0 to veth...` y el proceso entra en `FAULT STATE`; sin VIP, `presentation-entry` devuelve `curl: (52) Empty reply from server`. Reinicia los cuatro sidecars:
+Debes ver todos los servicios `Up` (o `healthy`), `{"status":"ok",...}` y `wsrep_cluster_size = 3` con `wsrep_cluster_status = Primary`.
 
-   ```powershell
-   docker restart distributed-three-tier-presentation-keepalived-master-1 distributed-three-tier-presentation-keepalived-backup-1 distributed-three-tier-application-keepalived-master-1 distributed-three-tier-application-keepalived-backup-1
-   ```
+**Si algo no vuelve** (por ejemplo, un `curl: (52) Empty reply from server`):
 
-   Verifica con `curl.exe -sS http://localhost/api/health`; debe responder `200` con `x-request-trace`.
+```powershell
+# 1. Comprueba que web1-3 estén arriba; si no, levántalos primero
+docker compose --env-file .env.exam up -d web1 web2 web3
 
-Para detener sin borrar datos: `docker compose --env-file .env.exam down`. Para borrar volúmenes: `docker compose --env-file .env.exam down -v` (destructivo). Redis no tiene volúmenes de persistencia: al recrear sus contenedores la caché arranca vacía.
+# 2. Recrea los HAProxy y luego los sidecars de Keepalived
+docker compose --env-file .env.exam up -d --force-recreate --no-deps presentation-lb-master presentation-lb-backup application-lb-master application-lb-backup
+docker compose --env-file .env.exam up -d --force-recreate --no-deps presentation-keepalived-master presentation-keepalived-backup application-keepalived-master application-keepalived-backup
+
+# 3. Si Galera no formó el clúster
+docker compose --env-file .env.exam up -d --no-deps galera2 galera3
+```
+
+Para apagar de forma ordenada antes de suspender el equipo:
+
+```powershell
+docker compose --env-file .env.exam stop
+```
+
+`docker compose stop` envía `SIGTERM` y respeta `stop_grace_period`, lo que permite a Galera cerrar limpio. Para detener sin borrar datos: `docker compose --env-file .env.exam down`. Para borrar volúmenes: `docker compose --env-file .env.exam down -v` (destructivo). Redis no tiene volúmenes de persistencia: al recrear sus contenedores la caché arranca vacía.
 
 ## PoC 1: Prueba de carga
 
