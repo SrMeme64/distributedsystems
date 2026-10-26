@@ -10,10 +10,10 @@ ejecutadas el 26-10-2026 están en el [`README.md`](../README.md). Esta carpeta
 cubre además el failover de los HAProxy master/backup de presentación y
 aplicación.
 
-## Topología comprobada (22-10-2026)
+## Topología comprobada (26-10-2026)
 
-- Host Docker: `192.168.1.69`, conectado por Wi-Fi.
-- Cliente LAN: `192.168.1.68`.
+- Host Docker: `192.168.1.72`, conectado por Wi-Fi.
+- Cliente LAN: consulta tu IP con `ipconfig` (en la ejecución del 22-10-2026 fue `192.168.1.68`).
 - La interfaz Wi-Fi del host tenía perfil `Public`; no se cambió el perfil.
 - Docker Compose se ejecutó únicamente en el host con `.env.exam`. El cliente
   solo envió solicitudes HTTP.
@@ -21,7 +21,8 @@ aplicación.
 
 Las IP pueden cambiar entre sesiones. Antes de repetir la prueba, obtén la IP
 actual del host con `ipconfig | findstr /i "IPv4"` y sustituye los valores de
-los comandos.
+los comandos. Los resultados del 22-10-2026 que aparecen más abajo usan las IP
+históricas `192.168.1.69` y `192.168.1.68`; no las copies sin comprobarlas.
 
 ## Resultados de la ejecución del 22-10-2026
 
@@ -42,32 +43,41 @@ los comandos.
 
 ## Firewall del host
 
-Durante la PoC del 22-10-2026 se creó y verificó una regla de entrada para TCP/80 con este
-alcance:
+La regla de entrada para TCP/80 está limitada al host, al cliente y a la
+interfaz Wi-Fi. El nombre es estable (`Distributed Store LAN PoC (TCP 80)`) y
+`Enable-LanPocFirewall.ps1` es idempotente: si cambia la IP del host o del
+cliente, actualiza el alcance de la regla existente en lugar de fallar o dejar
+una regla vieja. También elimina las reglas creadas por versiones anteriores del
+script, cuyo nombre incluía la IP del cliente.
 
-- Dirección local: `192.168.1.69`.
-- Dirección remota autorizada: `192.168.1.68`.
+Alcance de la regla actual:
+
+- Dirección local: la IP LAN actual del host (por ejemplo `192.168.1.72`).
+- Dirección remota autorizada: la IP del cliente.
 - Interfaz: `Wi-Fi`.
-- Perfil: `Public`, el perfil activo del host en esa ejecución.
+- Perfil: el perfil activo (`Public` en la sesión del 26-10-2026).
 - Edge traversal: bloqueado.
 
 No se cambió el perfil de red ni se abrió el puerto a toda la LAN. La excepción
 se autorizó porque ambos equipos estaban en una LAN privada de confianza, pese
 a la clasificación `Public` de Windows. El script de alta exige
 `-AllowPublicProfile` explícito en ese caso, además de una confirmación. No lo
-uses para permitir clientes no confiables. Si el cliente obtiene otra IP, hay
-que actualizar la regla o el script deja de coincidir con el cliente autorizado.
+uses para permitir clientes no confiables.
 
 Los scripts de firewall necesitan PowerShell como administrador. El de
-eliminación comprueba IPs, interfaz y puerto antes de quitar la regla. No se
-elimina automáticamente: mantenerla es una decisión del operador mientras
-continúen las pruebas LAN.
+eliminación comprueba IPs, interfaz y puerto antes de quitar la regla; usa
+`-Force` si cambió la IP y solo quieres limpiar. No se elimina automáticamente:
+mantenerla es una decisión del operador mientras continúen las pruebas LAN.
 
-## PoC 1-3 desde la laptop cliente
+## PoC 1-5 desde la laptop cliente
 
-Estas son las tres pruebas del [`README.md`](../README.md) ejecutadas desde la
-segunda laptop. El host solo detiene y vuelve a iniciar contenedores; el cliente
-genera la carga y verifica las respuestas.
+Estas son las cinco pruebas del [`README.md`](../README.md) ejecutadas desde la
+segunda laptop. El host solo detiene, pausa y vuelve a iniciar contenedores; el
+cliente genera la carga y verifica las respuestas.
+
+Para la demo no hace falta ejecutar los pasos manuales uno a uno: al final de
+esta sección están las **suites automatizadas**, que hacen el *preflight*, lanzan
+las PoC en orden y dejan evidencia en `PoCs/evidencias/`.
 
 **Requisitos en el cliente:** Windows 10/11, PowerShell 5.1 o superior, `curl.exe`
 y una copia de este repositorio. Si no tiene el repo, clónalo:
@@ -179,11 +189,11 @@ servicios de inicialización (`db-bootstrap`, `mongo-init`, `catalog-init`), lo
 que alarga la prueba sin aportar nada.
 
 `ps app1` debe mostrar `Up`. HAProxy necesita dos chequeos correctos
-(`rise 2`, intervalo de 2 s) antes de devolverlo a la rotación, así que espera
-unos 8 s y confirma:
+(`rise 2`, intervalo de 1 s) antes de devolverlo a la rotación, así que espera
+unos 4 s y confirma:
 
 ```powershell
-Start-Sleep -Seconds 8
+Start-Sleep -Seconds 4
 docker logs --tail 30 distributed-three-tier-application-lb-master-1 2>&1 |
     Select-String "app1 is UP"
 ```
@@ -232,6 +242,94 @@ cambios.
 alto de disponibilidad con pocos errores en la ventana de falla es el resultado
 esperado. Si el resumen no aparece, el monitor se interrumpió antes de terminar.
 
+### PoC 4 y 5: failover de los HAProxy master
+
+Estas dos PoC prueban la capa de balanceo, no los nodos API:
+
+- **PoC 4:** `presentation-lb-master` cede el VIP `172.30.0.250` a `presentation-lb-backup`.
+- **PoC 5:** `application-lb-master` cede el VIP `172.31.0.250` a `application-lb-backup`.
+
+**En el cliente**, deja activo el monitor o la suite del cliente (ver más abajo).
+
+**En el host**, ejecuta una capa y luego la otra:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-LanFailover.ps1 `
+  -Layer Presentation -HoldSeconds 12
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-LanFailover.ps1 `
+  -Layer Application -HoldSeconds 12
+```
+
+El script **pausa** el master en lugar de detenerlo: el sidecar Keepalived
+comparte su *network namespace* y pausar conserva ese namespace para que el VIP
+pueda migrar. Después reanuda el master y mide el *failback*. Un bloque
+`finally` garantiza la restauración incluso con `Ctrl+C`. Usa `-WhatIf` para
+revisar sin cambios.
+
+**Cómo verificar:** la salida debe terminar en `Resultado: PASS` con dos tiempos,
+por ejemplo:
+
+```text
+Resumen Presentation :
+  Failover presentation-lb-master -> presentation-lb-backup : 10.37 s (2 errores)
+  Failback presentation-lb-backup -> presentation-lb-master : 3.38 s (0 errores)
+  Resultado: PASS
+```
+
+En el cliente, la traza debe pasar de `presentation-lb-master` a
+`presentation-lb-backup` y volver. Los ~10 s incluyen el timeout del sondeo en
+curso; la migración directa del VIP ocurre en ~7.7 s.
+
+### Suites automatizadas
+
+Las suites agrupan las PoC, verifican el estado antes y después de cada una y
+escriben la evidencia en `PoCs/evidencias/`.
+
+**Readiness del stack (host):**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-StackHealth.ps1
+```
+
+Verifica Docker, 29 servicios, `/api/health`, catálogo, traza, Galera, ambos VIP
+y Nagios. Sale con código `0` solo si todo está listo.
+
+**Suite del host (PoC 2-5):**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-HostPocSuite.ps1 `
+  -HoldSeconds 12
+```
+
+Ejecuta PoC 2 (`app1`), PoC 3 (nodo aleatorio), PoC 4 (presentación) y PoC 5
+(aplicación). Hace *preflight*, repara el stack si hace falta y verifica el
+estado después de cada escenario. Puedes elegir escenarios con
+`-Scenarios poc4,poc5`.
+
+**Suite del cliente (conectividad, PoC 1 y monitor):**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-ClientPocSuite.ps1 `
+  -HostIPv4 "<IP_HOST>" -MonitorSeconds 240
+```
+
+Hace *preflight*, vacía la caché, mide carga fría y caliente, monitoriza
+`/api/health` durante la ventana indicada y calcula disponibilidad, failovers y
+failbacks. Si el *preflight* falla, imprime el comando de firewall exacto.
+
+**Flujo recomendado para la demo:**
+
+1. En el host: `Test-StackHealth.ps1` hasta ver `LISTO para la demo`.
+2. En el cliente: `Invoke-ClientPocSuite.ps1 -HostIPv4 "<IP_HOST>" -MonitorSeconds 240`.
+3. En el host, mientras corre el monitor: `Invoke-HostPocSuite.ps1 -HoldSeconds 12`.
+4. Revisar el resumen de ambas suites y los archivos de `PoCs/evidencias/`.
+
+**Resultado integrado del 26-10-2026:** host 4/4 PASS (PoC 4 failover 10.37 s,
+PoC 5 failover 10.31 s); cliente 327 muestras en 200.4 s, 321 `HTTP 200`, 6
+timeouts y **98.2 %** de disponibilidad. Failover de presentación 9.59 s y de
+aplicación 9.62 s vistos desde el cliente.
+
 ## Cómo repetir
 
 Desde PowerShell en la raíz del repositorio, después de confirmar la IP actual
@@ -262,8 +360,8 @@ bloquea, consulta al administrador.
 
    ```powershell
    .\PoCs\Enable-LanPocFirewall.ps1 `
-     -HostIPv4 "192.168.1.69" `
-     -ClientIPv4 "192.168.1.68" `
+     -HostIPv4 "192.168.1.72" `
+     -ClientIPv4 "<IP_CLIENTE>" `
      -InterfaceAlias "Wi-Fi" `
      -AllowPublicProfile
    ```
@@ -277,7 +375,14 @@ bloquea, consulta al administrador.
 
    ```powershell
    .\PoCs\Monitor-LanHealth.ps1 `
-     -HostIPv4 "192.168.1.69"
+     -HostIPv4 "192.168.1.72"
+   ```
+
+   O, mejor, lanzar la suite completa del cliente:
+
+   ```powershell
+   .\PoCs\Invoke-ClientPocSuite.ps1 `
+     -HostIPv4 "192.168.1.72" -MonitorSeconds 240
    ```
 
 4. Mientras el monitor del cliente imprime respuestas, ejecutar desde otra
@@ -296,6 +401,12 @@ bloquea, consulta al administrador.
      -Layer Application
    ```
 
+   O ejecutar las cuatro PoC del host en orden:
+
+   ```powershell
+   .\PoCs\Invoke-HostPocSuite.ps1 -HoldSeconds 12
+   ```
+
    El script pide confirmación antes de pausar el master seleccionado. Usa
    `-WhatIf` para revisar sin alterar servicios; solo acepta la confirmación
    cuando el monitor del cliente esté activo. El script intenta reanudar el
@@ -307,8 +418,8 @@ bloquea, consulta al administrador.
 
    ```powershell
    .\PoCs\Remove-LanPocFirewall.ps1 `
-     -HostIPv4 "192.168.1.69" `
-     -ClientIPv4 "192.168.1.68" `
+     -HostIPv4 "192.168.1.72" `
+     -ClientIPv4 "<IP_CLIENTE>" `
      -InterfaceAlias "Wi-Fi"
    ```
 
@@ -318,11 +429,35 @@ cambiar entre sesiones.
 
 ## Scripts incluidos
 
-| Script | Función |
-|---|---|
-| `Enable-LanPocFirewall.ps1` | Crea una regla de firewall limitada a TCP/80 entre host y cliente por la interfaz correcta. Requiere PowerShell como administrador. |
-| `Remove-LanPocFirewall.ps1` | Elimina la regla de firewall creada por `Enable-LanPocFirewall.ps1`. Verifica IPs, interfaz y puerto antes de quitar. |
-| `Monitor-LanHealth.ps1` | Monitoriza la API del host desde el cliente, imprimiendo HTTP status, traza y un resumen final de disponibilidad. |
-| `Invoke-LoadTest.ps1` | Genera carga HTTP desde el cliente sin instalar `ab`: solicitudes, concurrencia, req/s, latencias p50/p95/p99 y códigos HTTP. |
-| `Test-LanFailover.ps1` | Pausa el HAProxy master de la capa indicada, espera el failover al backup y luego recupera el master. |
-| `Invoke-ChaosTest.ps1` | Detiene un nodo API aleatorio (o `-Target`) durante `-HoldSeconds` y lo restaura siempre en un bloque `finally`, verificando que HAProxy lo marque `UP`. |
+| Script | Dónde se ejecuta | Función |
+|---|---|---|
+| `Test-StackHealth.ps1` | Host | Readiness integral: Docker, 29 servicios, API, catálogo, traza, Galera, VIPs y Nagios. Código `0` = listo. |
+| `Invoke-HostPocSuite.ps1` | Host | Suite PoC 2-5 con *preflight*, reparación y verificación posterior; escribe evidencia. |
+| `Invoke-ClientPocSuite.ps1` | Cliente | *Preflight*, PoC 1 de carga, monitor continuo, detección de failover/failback y CSV. |
+| `Enable-LanPocFirewall.ps1` | Host (admin) | Crea o actualiza una regla idempotente limitada a TCP/80 entre host y cliente por la interfaz correcta. |
+| `Remove-LanPocFirewall.ps1` | Host (admin) | Elimina la regla de la PoC; verifica IPs, interfaz y puerto, o usa `-Force` para limpiar. |
+| `Monitor-LanHealth.ps1` | Cliente | Monitoriza la API del host, imprimiendo HTTP status, traza y un resumen final de disponibilidad. |
+| `Invoke-LoadTest.ps1` | Cliente | Genera carga HTTP sin instalar `ab`: solicitudes, concurrencia, req/s, latencias p50/p95/p99 y códigos HTTP. |
+| `Test-LanFailover.ps1` | Host | Pausa el HAProxy master de la capa indicada, espera el failover al backup, mide tiempos y recupera el master. |
+| `Invoke-ChaosTest.ps1` | Host | Detiene un nodo API aleatorio (o `-Target`) durante `-HoldSeconds` y lo restaura siempre en un bloque `finally`, verificando que HAProxy lo marque `UP`. |
+
+## Arranque automático
+
+El arranque automático se instala desde la raíz del repositorio, no desde esta
+carpeta:
+
+```powershell
+# Instalar (acceso en la carpeta Startup, sin permisos de administrador)
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\Install-AutoStart.ps1
+
+# Alternativa con el Programador de tareas
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\Install-AutoStart.ps1 -UseScheduledTask
+
+# Quitar
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\Install-AutoStart.ps1 -Remove
+```
+
+`..\Start-Stack.ps1` espera a Docker, ejecuta `docker compose up -d`, valida con
+`Test-StackHealth.ps1` y deja el log en `PoCs/evidencias/start-stack.log`.
+Activa además **Docker Desktop → Settings → General → Start Docker Desktop when
+you sign in**.

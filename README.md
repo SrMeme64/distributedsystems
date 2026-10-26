@@ -421,12 +421,187 @@ curl.exe -sS http://localhost/api/health
 
 **Lectura:** el servicio nunca dejó de responder por completo: 68 de 70 sondeos fueron `200` y los dos fallos coinciden con la ventana de convergencia de HAProxy. El experimento valida **resiliencia** (el sistema sobrevive a la pérdida de una réplica) y **alta disponibilidad** (las réplicas restantes absorben el tráfico), pero no garantiza cero errores: la ventana de detección del nodo caído produce timeouts transitorios. Para reducirla habría que acortar `inter`/`fall` en HAProxy o añadir reintentos en el cliente.
 
+## PoC 4: Failover del HAProxy de presentación
+
+**Objetivo:** comprobar que, si el HAProxy de presentación activo deja de responder, Keepalived mueve el VIP `172.30.0.250` al backup y el sitio sigue disponible sin cambiar la IP de entrada.
+
+**Cómo funciona:** `presentation-lb-master` y `presentation-lb-backup` comparten el VIP mediante Keepalived. Cada HAProxy tiene un sidecar Keepalived en su mismo *network namespace*. El sidecar ejecuta `check-haproxy.sh`, que exige una respuesta HTTP real de HAProxy (no basta con que el puerto acepte la conexión). Si el master falla, el backup sube su prioridad y reclama el VIP.
+
+**En el host**, desde la raíz del repositorio:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-LanFailover.ps1 `
+  -Layer Presentation -HoldSeconds 12
+```
+
+El script:
+
+1. Comprueba la línea base: la traza debe pasar por `presentation-lb-master`.
+2. **Pausa** (no detiene) el contenedor master. Pausar conserva el *network namespace* del sidecar, condición necesaria para que Keepalived pueda degradarse y ceder el VIP.
+3. Sondea `/api/health` hasta ver `presentation-lb-backup` en la cabecera `X-Request-Trace` y mide el tiempo.
+4. Mantiene la falla `HoldSeconds`.
+5. Reanuda el master y espera el *failback*, midiendo el tiempo.
+6. Restaura el nodo en un bloque `finally` aunque pulses `Ctrl+C`.
+
+Para revisar sin tocar nada: añade `-WhatIf`.
+
+**Resultados (26-10-2026, host `192.168.1.72`):**
+
+| Métrica | Valor |
+|---|---|
+| Migración directa del VIP al backup | 7.7 s |
+| Failover observado en la traza | 10.37 s |
+| Timeouts durante la convergencia | 2 |
+| Failback al master | 3.38 s |
+| Estado final | `presentation-lb-master` con el VIP, `HTTP 200` |
+
+**Lectura:** el VIP migra en ~7.7 s y el primer `HTTP 200` atendido por el backup se observa en ~10.4 s porque el sondeo en curso agota su timeout antes de reintentar. No hay pérdida de tráfico permanente: la ventana de error queda acotada a la convergencia. El *failback* es más rápido (~3.4 s) porque el master vuelve con prioridad 110.
+
+## PoC 5: Failover del HAProxy de aplicación
+
+**Objetivo:** repetir el failover de la capa de aplicación: `application-lb-master` cede el VIP `172.31.0.250` a `application-lb-backup` y las tres réplicas API siguen accesibles.
+
+**En el host:**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-LanFailover.ps1 `
+  -Layer Application -HoldSeconds 12
+```
+
+El procedimiento es idéntico al de la PoC 4, pero sobre `application-lb-master` / `application-lb-backup` y el VIP `172.31.0.250`. La traza esperada es `presentation-lb-* -> webnodeN -> application-lb-backup -> appN -> ...`.
+
+**Resultados (26-10-2026, host `192.168.1.72`):**
+
+| Métrica | Valor |
+|---|---|
+| Failover observado en la traza | 10.31 s |
+| Timeouts durante la convergencia | 2 |
+| Failback al master | 4.42 s |
+| Estado final | `application-lb-master` con el VIP, `HTTP 200` |
+
+**Lectura:** el comportamiento es simétrico al de presentación. El cliente no cambia de URL: sigue usando el puerto 80 del host y el VIP de aplicación se mueve por debajo. La ventana de error es de dos sondeos, no de una caída del servicio.
+
+## Suites automatizadas (guiadas de punta a punta)
+
+Los scripts anteriores se pueden ejecutar uno a uno, pero para la demo conviene usar las suites: hacen *preflight*, ejecutan las PoC en orden, verifican el estado después de cada una y dejan evidencia en disco.
+
+### 1. Readiness del stack
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-StackHealth.ps1
+```
+
+Comprueba, en este orden: daemon de Docker, 29 servicios `Up` (con *healthcheck* cuando aplica), `/api/health`, `/api/products/cheapest`, traza end-to-end, clúster Galera (`size=3`, `Primary`, `Synced`), VIP de presentación, VIP de aplicación y Nagios en `127.0.0.1:8088`. Sale con código `0` solo si todo pasa. Es el mismo chequeo que usa el arranque automático.
+
+### 2. Suite del host (PoC 2-5)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-HostPocSuite.ps1 `
+  -HoldSeconds 12
+```
+
+Ejecuta, en orden:
+
+| Escenario | Qué hace |
+|---|---|
+| PoC 2 | detiene `app1`, verifica el `DOWN` de HAProxy y lo restaura |
+| PoC 3 | detiene un nodo API aleatorio (Chaos Engineering) y lo restaura |
+| PoC 4 | failover de `presentation-lb-master` |
+| PoC 5 | failover de `application-lb-master` |
+
+Antes de empezar hace *preflight*; si el stack no está listo intenta repararlo con `docker compose up -d`. Después de cada escenario vuelve a verificar el stack. Si algo queda mal, detiene la suite. Puedes elegir escenarios con `-Scenarios poc4,poc5` y omitir la verificación con `-SkipHealthCheck`.
+
+### 3. Suite del cliente (conectividad, carga y monitor)
+
+Se ejecuta **en el cliente**, no en el host:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-ClientPocSuite.ps1 `
+  -HostIPv4 "<IP_DEL_HOST>" -MonitorSeconds 240
+```
+
+1. *Preflight*: TCP/80, `/api/health` y `/api/products/cheapest`.
+2. PoC 1: vacía la caché y ejecuta carga fría y caliente con `Invoke-LoadTest.ps1`.
+3. Monitor: sondea `/api/health` durante `MonitorSeconds` y registra cada muestra.
+4. Al terminar calcula la disponibilidad, detecta los failover/failback de presentación y aplicación, y escribe un CSV con todas las muestras.
+
+Si el *preflight* falla, imprime el comando exacto de firewall que hay que ejecutar en el host.
+
+### Flujo recomendado para la demo
+
+1. En el host: `Test-StackHealth.ps1` hasta ver `LISTO para la demo`.
+2. En el cliente: lanzar `Invoke-ClientPocSuite.ps1 -HostIPv4 "<IP_DEL_HOST>" -MonitorSeconds 240`.
+3. En el host, mientras el monitor corre: `Invoke-HostPocSuite.ps1 -HoldSeconds 12`.
+4. Al terminar, revisar el resumen del cliente (disponibilidad y failovers) y el resumen del host (4/4 PASS).
+
+### Resultado de la ejecución integrada (26-10-2026)
+
+| Suite | Resultado |
+|---|---|
+| Host | 4/4 PASS: PoC 2 (`app1`, 23.6 s), PoC 3 (`app3`, 19.5 s), PoC 4 (failover 10.37 s), PoC 5 (failover 10.31 s) |
+| Cliente | 327 muestras en 200.4 s, 321 `HTTP 200`, 6 timeouts, disponibilidad **98.2 %** |
+| Failover de presentación visto por el cliente | 9.59 s; failback 6.44 s |
+| Failover de aplicación visto por el cliente | 9.62 s; failback 6.96 s |
+| Nodos API observados | `app1`, `app2`, `app3` |
+
+Evidencias:
+
+- [`PoCs/evidencias/host-poc-suite-20261025-224035.txt`](PoCs/evidencias/host-poc-suite-20261025-224035.txt)
+- [`PoCs/evidencias/client-poc-suite-20261025-224033.txt`](PoCs/evidencias/client-poc-suite-20261025-224033.txt)
+- [`PoCs/evidencias/client-monitor-20261025-224033.csv`](PoCs/evidencias/client-monitor-20261025-224033.csv)
+
+## Arranque automático tras reiniciar el ordenador
+
+Los 29 servicios de larga duración usan `restart: always`, así que Docker los vuelve a levantar al arrancar el daemon. Los servicios *one-shot* (`db-bootstrap`, `catalog-init`, `mongo-init`, `mongo-keyfile-init`) usan `restart: "no"` porque no son procesos permanentes.
+
+Para que el stack esté listo sin intervención manual:
+
+1. En Docker Desktop, activa **Settings → General → Start Docker Desktop when you sign in**.
+2. Instala el arranque automático del stack (no requiere administrador):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AutoStart.ps1
+```
+
+Crea un acceso en la carpeta *Startup* del usuario que ejecuta `Start-Stack.ps1` con la ventana oculta. Alternativas:
+
+```powershell
+# Usar el Programador de tareas en lugar de la carpeta Startup
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AutoStart.ps1 -UseScheduledTask
+
+# Quitar el arranque automático
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AutoStart.ps1 -Remove
+
+# Lanzar el arranque ahora para probarlo
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AutoStart.ps1 -StartNow
+```
+
+`Start-Stack.ps1` es idempotente y se puede ejecutar a mano en cualquier momento:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-Stack.ps1
+```
+
+Espera a que el daemon responda (e inicia Docker Desktop si hace falta), ejecuta `docker compose up -d`, espera el readiness con `Test-StackHealth.ps1` y sale con `0` solo si el stack está listo. El log queda en `PoCs/evidencias/start-stack.log`.
+
+**Comprobación tras un reinicio real:**
+
+```powershell
+docker compose --env-file .env.exam ps --format "table {{.Service}}\t{{.Status}}"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Test-StackHealth.ps1
+```
+
+Deben aparecer **29/29** servicios `Up` (13 de ellos con `(healthy)`) y el resultado `LISTO para la demo`. Si algún contenedor queda `Exited`, revisa `docker logs <servicio>`; `restart: always` no reintenta un contenedor que Docker marcó como *removed* por un `docker compose down` previo, en cuyo caso basta con `Start-Stack.ps1`.
+
 ## Documentación y evidencias
 
-Las tres PoC se ejecutaron el **26-10-2026** sobre el host `192.168.1.72` con el stack completo y `/api/health` en `200 {"status":"ok"}` antes y después de cada prueba. Los resultados medidos están en las tablas de las secciones anteriores.
+Las cinco PoC se ejecutaron el **26-10-2026** sobre el host `192.168.1.72` con el stack completo y `/api/health` en `200 {"status":"ok"}` antes y después de cada prueba. Los resultados medidos están en las tablas de las secciones anteriores.
 
 - **PoC 1:** ApacheBench dentro de `httpd:alpine` en la red `edge`; 0 solicitudes fallidas en los cuatro escenarios.
-- **PoC 2:** 3/3 `200` en la línea base, 6/8 durante la convergencia y 10/10 con `app1` caído; `app1` volvió a la rotación al reiniciarse.
+- **PoC 2:** 3/3 `200` en la línea base, 6/8 durante la convergencia y 10/10 con `app1` caído; `app1` volvió a la rotación al reiniciarse. Con los chequeos afinados, HAProxy marca el nodo `DOWN` en ~6.4 s.
 - **PoC 3:** 68/70 `200` (97.1 %) durante la inyección de falla; la salida cruda del monitor está en [`PoCs/evidencias/poc3-chaos-monitor-2026-10-26.txt`](PoCs/evidencias/poc3-chaos-monitor-2026-10-26.txt).
+- **PoC 4:** el VIP de presentación migró en 7.7 s; failover observado en 10.37 s y failback en 3.38 s.
+- **PoC 5:** failover de aplicación observado en 10.31 s y failback en 4.42 s.
+- **Suites:** host 4/4 PASS y cliente con 98.2 % de disponibilidad en 200.4 s.
 
 Los scripts reutilizables y las instrucciones de ejecución desde una laptop externa, incluido el firewall, están en [`PoCs/README.md`](PoCs/README.md).

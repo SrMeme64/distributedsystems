@@ -671,8 +671,18 @@ services:
   nagios:
     image: jasonrivers/nagios:latest
     restart: always
+    # The base image ships a stale /var/run/nsca.pid (PID 21). Without removing
+    # it, nsca believes another instance is running and runit restarts it in a
+    # tight loop. Remove the stale file before starting the supervisors.
+    entrypoint: ["/bin/bash", "-c", "rm -f /var/run/nsca.pid && exec /usr/local/bin/start_nagios"]
     ports:
       - "127.0.0.1:8088:80"
+    healthcheck:
+      test: ["CMD-SHELL", "code=$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/nagios/); [ \"$$code\" = \"200\" ] || [ \"$$code\" = \"401\" ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     environment:
       NAGIOSADMIN_USER: nagiosadmin
       NAGIOSADMIN_PASS: ${NAGIOSADMIN_PASSWORD:?Set NAGIOSADMIN_PASSWORD in the Compose env file}

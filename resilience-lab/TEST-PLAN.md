@@ -74,7 +74,7 @@ compare against the hypothesis, recover, record findings.
 
 - `presentation-entry` is a single point of failure.
 - ProxySQL is a single instance; stopping it takes the whole database tier out of the API.
-- Compose `restart: unless-stopped` does not restart a container that was stopped deliberately.
+- Compose `restart: always` restarts containers when Docker starts, but a `docker compose down` removes them: after `down`, run `Start-Stack.ps1` (or `docker compose up -d`) to recreate them.
 - All containers still run on one Docker host, so host or Docker Desktop failure is a total outage.
 - Sentinel uses fixed IPs in the `172.32.0.0/24` database network; changing that subnet requires updating `redis/sentinel.conf` and `redis/redis-replica.conf`.
 
@@ -86,7 +86,9 @@ compare against the hypothesis, recover, record findings.
 | `mongo1` (primary) stopped | `mongo2` was elected primary; `GET` reviews returned 200 and `POST` returned 201. After restart, `mongo1` became primary again. |
 | Current Redis master stopped | Sentinel promoted another node; `/api/health` returned 200 and the catalog returned 200 with `redis (unavailable) -> mariadb`; `/cache/clear` returned 503. |
 | All Redis containers stopped | `/api/health` returned 200 `degraded`; the catalog returned 200 from MariaDB. After restart, health returned to `ok` and the catalog repopulated the cache. |
-| `app1` stopped | HAProxy removed the node; `/api/health` stayed 200 on `app2`/`app3`. |
+| `app1` stopped | HAProxy removed the node in ~6.4 s; `/api/health` stayed 200 on `app2`/`app3` (7 of 8 probes 200 during the window). |
+| `presentation-lb-master` paused | Keepalived moved the VIP `172.30.0.250` to `presentation-lb-backup` in ~7.7 s; first 200 trace on the backup at ~10.4 s; failback ~3.4 s. |
+| `application-lb-master` paused | Keepalived moved the VIP `172.31.0.250` to `application-lb-backup`; first 200 trace on the backup at ~10.3 s; failback ~4.4 s. |
 
 ## Commonly used tools
 

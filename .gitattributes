@@ -1,0 +1,9 @@
+# Shell scripts and service configs are consumed by Linux containers.
+# Force LF so a Windows checkout cannot inject CRLF into a shebang or a
+# Keepalived/HAProxy/Nagios config again.
+* text=auto
+*.sh text eol=lf
+*.conf text eol=lf
+*.cfg text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

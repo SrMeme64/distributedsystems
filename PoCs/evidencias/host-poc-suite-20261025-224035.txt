@@ -1,0 +1,152 @@
+﻿=== Suite de PoC en el host ===
+Fecha: 2026-10-25 22:40:35
+Evidencia: C:\Users\DELL\.local\share\opencode\worktree\846169\cosmic-garden\PoCs\evidencias\host-poc-suite-20261025-224035.txt
+
+En el CLIENTE, ejecuta ahora (o deja el monitor ya activo):
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-ClientPocSuite.ps1 -HostIPv4 "192.168.1.72" -MonitorSeconds 240
+
+La suite del host empieza en 15 s...
+--- Preflight: readiness del stack ---
+[PASS] Docker daemon                    docker info responde
+[PASS] Servicios                        29/29 Up
+[PASS] API /api/health                  status=ok mariadb=ok mongodb=ok redis=ok
+[PASS] API /api/products/cheapest       HTTP 200, 1157 bytes
+[PASS] Traza end-to-end                 presentation-lb-master -> webnode2 -> application-lb-master -> app2 -> mariadb -> mongodb -> redis
+[PASS] Galera                           size=3 status=Primary state=Synced
+[PASS] VIP Presentacion                 172.30.0.250 en presentation-lb-master
+[PASS] VIP Aplicacion                   172.31.0.250 en application-lb-master
+[PASS] Nagios 127.0.0.1:8088            TCP acepta conexiones
+
+Resultado: LISTO para la demo (9 comprobaciones).
+Preflight OK.
+
+================================================================
+--- PoC 2 - failover de app1 ---
+Nodo seleccionado: app1
+Inicio: 22:40:54  (mantener caido 12 s)
+Estado inicial: app1|Up 8 minutes
+Detenido: 22:40:55.553  app1
+HAProxy: Server application_nodes/app1 is DOWN, reason: Layer4 timeout, check duration: 1002ms. 2 active and 0 backup servers left. 3 sessions active, 0 requeued, 0 remaining in queue.
+Restaurando: 22:41:08.208  app1
+Estado: app1|Up Less than a second
+HAProxy: [WARNING]  (8) : Server application_nodes/app1 is UP, reason: Layer7 check passed, code: 200, check duration: 6ms. 3 active and 0 backup servers online. 0 sessions requeued, 0 total in queue.
+
+Resumen app1 :
+  DOWN observado: 6.41 s
+  UP observado tras restaurar: 15.89 s
+  Probes durante la caida: 8 (7 OK, 1 errores)
+  Traza final: presentation-lb-master -> webnode2 -> application-lb-master -> app1 -> mariadb -> mongodb -> redis
+  Resultado: PASS
+Resultado PoC 2 - failover de app1 : PASS (23.6 s) nodo=app1 PASS
+
+[PASS] Docker daemon                    docker info responde
+[PASS] Servicios                        29/29 Up
+[PASS] API /api/health                  status=ok mariadb=ok mongodb=ok redis=ok
+[PASS] API /api/products/cheapest       HTTP 200, 1157 bytes
+[PASS] Traza end-to-end                 presentation-lb-master -> webnode2 -> application-lb-master -> app1 -> mariadb -> mongodb -> redis
+[PASS] Galera                           size=3 status=Primary state=Synced
+[PASS] VIP Presentacion                 172.30.0.250 en presentation-lb-master
+[PASS] VIP Aplicacion                   172.31.0.250 en application-lb-master
+[PASS] Nagios 127.0.0.1:8088            TCP acepta conexiones
+
+Resultado: LISTO para la demo (9 comprobaciones).
+Verificacion posterior: OK.
+
+================================================================
+--- PoC 3 - Chaos Engineering (nodo aleatorio) ---
+Nodo seleccionado: app3
+Inicio: 22:41:20  (mantener caido 12 s)
+Estado inicial: app3|Up 35 minutes
+Detenido: 22:41:21.525  app3
+HAProxy: [WARNING]  (8) : Server application_nodes/app3 is DOWN, reason: Layer4 timeout, check duration: 1000ms. 2 active and 0 backup servers left. 3 sessions active, 0 requeued, 0 remaining in queue.
+Restaurando: 22:41:34.197  app3
+Estado: app3|Up Less than a second
+HAProxy: [WARNING]  (8) : Server application_nodes/app3 is UP, reason: Layer7 check passed, code: 200, check duration: 3ms. 3 active and 0 backup servers online. 0 sessions requeued, 0 total in queue.
+
+Resumen app3 :
+  DOWN observado: 6.41 s
+  UP observado tras restaurar: 16.09 s
+  Probes durante la caida: 8 (7 OK, 1 errores)
+  Traza final: presentation-lb-master -> webnode1 -> application-lb-master -> app3 -> mariadb -> mongodb -> redis
+  Resultado: PASS
+Resultado PoC 3 - Chaos Engineering (nodo aleatorio) : PASS (19.5 s) nodo=app3 PASS
+
+[PASS] Docker daemon                    docker info responde
+[PASS] Servicios                        29/29 Up
+[PASS] API /api/health                  status=ok mariadb=ok mongodb=ok redis=ok
+[PASS] API /api/products/cheapest       HTTP 200, 1157 bytes
+[PASS] Traza end-to-end                 presentation-lb-master -> webnode2 -> application-lb-master -> app1 -> mariadb -> mongodb -> redis
+[PASS] Galera                           size=3 status=Primary state=Synced
+[PASS] VIP Presentacion                 172.30.0.250 en presentation-lb-master
+[PASS] VIP Aplicacion                   172.31.0.250 en application-lb-master
+[PASS] Nagios 127.0.0.1:8088            TCP acepta conexiones
+
+Resultado: LISTO para la demo (9 comprobaciones).
+Verificacion posterior: OK.
+
+================================================================
+--- PoC 4 - failover presentation-lb-master ---
+Estado inicial: HTTP 200 presentation-lb-master -> webnode3 -> application-lb-master -> app2 -> mariadb -> mongodb -> redis
+Master pausado: 22:41:42.321  presentation-lb-master
+Failover observado en 10.37 s con 2 error(es) de convergencia.
+22:41:52.726 HTTP 200 presentation-lb-backup -> webnode3 -> application-lb-master -> app2 -> mariadb -> mongodb -> redis
+22:41:53.766 HTTP 200 presentation-lb-backup -> webnode1 -> application-lb-master -> app3 -> mariadb -> mongodb -> redis
+Master reanudado: 22:41:54.771  presentation-lb-master
+Failback observado en 3.38 s con 0 error(es) de convergencia.
+
+Resumen Presentation :
+  Failover presentation-lb-master -> presentation-lb-backup : 10.37 s (2 errores)
+  Failback presentation-lb-backup -> presentation-lb-master : 3.38 s (0 errores)
+  Resultado: PASS
+Resultado PoC 4 - failover presentation-lb-master : PASS (16.7 s) failover=10.37s PASS
+
+[PASS] Docker daemon                    docker info responde
+[PASS] Servicios                        29/29 Up
+[PASS] API /api/health                  status=ok mariadb=ok mongodb=ok redis=ok
+[PASS] API /api/products/cheapest       HTTP 200, 1157 bytes
+[PASS] Traza end-to-end                 presentation-lb-master -> webnode3 -> application-lb-master -> app2 -> mariadb -> mongodb -> redis
+[PASS] Galera                           size=3 status=Primary state=Synced
+[PASS] VIP Presentacion                 172.30.0.250 en presentation-lb-master
+[PASS] VIP Aplicacion                   172.31.0.250 en application-lb-master
+[PASS] Nagios 127.0.0.1:8088            TCP acepta conexiones
+
+Resultado: LISTO para la demo (9 comprobaciones).
+Verificacion posterior: OK.
+
+================================================================
+--- PoC 5 - failover application-lb-master ---
+Estado inicial: HTTP 200 presentation-lb-master -> webnode2 -> application-lb-master -> app1 -> mariadb -> mongodb -> redis
+Master pausado: 22:42:01.693  application-lb-master
+Failover observado en 10.31 s con 2 error(es) de convergencia.
+22:42:12.052 HTTP 200 presentation-lb-master -> webnode3 -> application-lb-backup -> app3 -> mariadb -> mongodb -> redis
+22:42:13.070 HTTP 200 presentation-lb-master -> webnode1 -> application-lb-backup -> app2 -> mariadb -> mongodb -> redis
+Master reanudado: 22:42:14.082  application-lb-master
+Failback observado en 4.42 s con 0 error(es) de convergencia.
+
+Resumen Application :
+  Failover application-lb-master -> application-lb-backup : 10.31 s (2 errores)
+  Failback application-lb-backup -> application-lb-master : 4.42 s (0 errores)
+  Resultado: PASS
+Resultado PoC 5 - failover application-lb-master : PASS (17.7 s) failover=10.31s PASS
+
+[PASS] Docker daemon                    docker info responde
+[PASS] Servicios                        29/29 Up
+[PASS] API /api/health                  status=ok mariadb=ok mongodb=ok redis=ok
+[PASS] API /api/products/cheapest       HTTP 200, 1157 bytes
+[PASS] Traza end-to-end                 presentation-lb-master -> webnode3 -> application-lb-master -> app3 -> mariadb -> mongodb -> redis
+[PASS] Galera                           size=3 status=Primary state=Synced
+[PASS] VIP Presentacion                 172.30.0.250 en presentation-lb-master
+[PASS] VIP Aplicacion                   172.31.0.250 en application-lb-master
+[PASS] Nagios 127.0.0.1:8088            TCP acepta conexiones
+
+Resultado: LISTO para la demo (9 comprobaciones).
+Verificacion posterior: OK.
+
+================================================================
+Resumen de la suite
+  [PASS] PoC 2 - failover de app1                           23.6 s  nodo=app1 PASS
+  [PASS] PoC 3 - Chaos Engineering (nodo aleatorio)         19.5 s  nodo=app3 PASS
+  [PASS] PoC 4 - failover presentation-lb-master            16.7 s  failover=10.37s PASS
+  [PASS] PoC 5 - failover application-lb-master             17.7 s  failover=10.31s PASS
+
+Resultado global: PASS

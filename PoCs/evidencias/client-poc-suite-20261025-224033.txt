@@ -1,0 +1,65 @@
+﻿=== Suite de PoC en el cliente ===
+Fecha: 2026-10-25 22:40:33
+Host: http://192.168.1.72
+Evidencia: C:\Users\DELL\.local\share\opencode\worktree\846169\cosmic-garden\PoCs\evidencias\client-poc-suite-20261025-224033.txt
+
+--- Preflight: conectividad cliente -> host ---
+TCP/80: OK
+GET /api/health: HTTP 200 presentation-lb-master -> webnode3 -> application-lb-master -> app3 -> mariadb -> mongodb -> redis
+GET /api/products/cheapest: HTTP 200, 1157 bytes
+
+--- PoC 1: cache fria vs caliente ---
+POST /api/cache/clear: HTTP 200
+--- Carga fria (1 solicitudes, concurrencia 1) ---
+URL:                  http://192.168.1.72/api/products/cheapest
+Solicitudes:          1
+Concurrencia:         1
+Duracion total:       0.052 s
+Req/s:                19.14
+Latencia media:       33.382 ms
+Latencia p50:         33.382 ms
+Latencia p95:         33.382 ms
+Latencia p99:         33.382 ms
+Latencia min:         33.382 ms
+Latencia max:         33.382 ms
+Errores:              0
+Codigos HTTP:         200=1
+--- Carga caliente (100 solicitudes, concurrencia 10) ---
+URL:                  http://192.168.1.72/api/products/cheapest
+Solicitudes:          100
+Concurrencia:         10
+Duracion total:       0.128 s
+Req/s:                778.99
+Latencia media:       9.446 ms
+Latencia p50:         7.211 ms
+Latencia p95:         31.361 ms
+Latencia p99:         31.475 ms
+Latencia min:         5.691 ms
+Latencia max:         34.091 ms
+Errores:              0
+Codigos HTTP:         200=100
+
+Comparacion de carga:
+  Fria    : 19.14 req/s, 33.382 ms de media
+  Caliente: 778.99 req/s, 9.446 ms de media
+  La cache caliente responde mas rapido que la fria (comportamiento esperado).
+
+--- PoC 2-5: monitor continuo ---
+Ventana: 200 s, una muestra cada 500 ms.
+En el HOST, ejecuta ahora:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-HostPocSuite.ps1 -HoldSeconds 15
+
+El monitor empieza en 5 s...
+
+================================================================
+Resumen del monitor
+  Ventana: 200.4 s, 327 muestras
+  HTTP 200: 321, errores: 6, disponibilidad: 98.2 %
+  Nodos API observados: app1, app2, app3
+  Failover presentation-lb: SI (deteccion 9.59 s), failback 6.44 s
+  Failover application-lb: SI (deteccion 9.62 s), failback 6.96 s
+  Errores mas frecuentes:
+    6 x La operación sobrepasó el tiempo de espera.
+  CSV: C:\Users\DELL\.local\share\opencode\worktree\846169\cosmic-garden\PoCs\evidencias\client-monitor-20261025-224033.csv
+
+Resultado: PASS (disponibilidad 98.2 % >= 95.0 %)

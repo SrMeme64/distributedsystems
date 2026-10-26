@@ -7,42 +7,70 @@ param(
     [string]$ClientIPv4,
 
     [Parameter(Mandatory = $true)]
-    [string]$InterfaceAlias
+    [string]$InterfaceAlias,
+
+    [switch]$Force
 )
 
-$ruleName = "Distributed Store HTTP test from $ClientIPv4"
-$rules = @(Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)
+# Removes the rule created by Enable-LanPocFirewall.ps1 and any rule left by
+# older versions. By default it verifies the exact scope before deleting;
+# use -Force if the host/client IP changed and you only want to clean up.
+
+$ruleName = "Distributed Store LAN PoC (TCP 80)"
+$legacyPrefix = "Distributed Store HTTP test from "
+
+function ConvertTo-IPv4Address {
+    param([string]$Address, [string]$ParameterName)
+
+    $parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed) -or
+        $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        throw "$ParameterName debe ser una direccion IPv4 valida: $Address"
+    }
+    $parsed
+}
+
+$null = ConvertTo-IPv4Address -Address $HostIPv4 -ParameterName "HostIPv4"
+$null = ConvertTo-IPv4Address -Address $ClientIPv4 -ParameterName "ClientIPv4"
+
+$rules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -eq $ruleName -or $_.DisplayName -like "$legacyPrefix*" })
+
 if ($rules.Count -eq 0) {
-    Write-Output "No existe la regla '$ruleName'; no hay cambios."
+    Write-Output "No existe ninguna regla de la PoC LAN; no hay cambios."
     return
 }
-if ($rules.Count -ne 1) {
-    throw "Se esperaba una sola regla '$ruleName'; encontrados: $($rules.Count). No se elimino ninguna."
+
+$removed = 0
+foreach ($rule in $rules) {
+    $addressFilter = $rule | Get-NetFirewallAddressFilter
+    $portFilter = $rule | Get-NetFirewallPortFilter
+    $interfaceFilter = $rule | Get-NetFirewallInterfaceFilter
+
+    $matchesScope = (
+        $rule.Direction -eq "Inbound" -and
+        $rule.Action -eq "Allow" -and
+        $rule.EdgeTraversalPolicy -eq "Block" -and
+        $portFilter.Protocol -eq "TCP" -and
+        @($portFilter.LocalPort) -contains "80" -and
+        @($interfaceFilter.InterfaceAlias) -contains $InterfaceAlias -and
+        @($addressFilter.LocalAddress) -contains $HostIPv4 -and
+        @($addressFilter.RemoteAddress) -contains $ClientIPv4
+    )
+
+    if (-not $matchesScope -and -not $Force) {
+        Write-Warning "La regla '$($rule.DisplayName)' no coincide con las IP, interfaz y TCP/80 esperados; no se elimino. Usa -Force para limpiarla."
+        continue
+    }
+
+    $target = "regla '$($rule.DisplayName)' ($ClientIPv4 -> $HostIPv4 TCP/80, $InterfaceAlias)"
+    if ($PSCmdlet.ShouldProcess($target, "Eliminar regla de Windows Firewall")) {
+        Remove-NetFirewallRule -Name $rule.Name -ErrorAction Stop
+        Write-Output "Regla eliminada: $($rule.DisplayName)"
+        $removed++
+    }
 }
 
-$rule = $rules[0]
-$addressFilter = $rule | Get-NetFirewallAddressFilter
-$portFilter = $rule | Get-NetFirewallPortFilter
-$interfaceFilter = $rule | Get-NetFirewallInterfaceFilter
-
-$localAddresses = @($addressFilter.LocalAddress)
-$remoteAddresses = @($addressFilter.RemoteAddress)
-$localPorts = @($portFilter.LocalPort)
-$interfaces = @($interfaceFilter.InterfaceAlias)
-
-if ($rule.Direction -ne "Inbound" -or
-    $rule.Action -ne "Allow" -or
-    $rule.EdgeTraversalPolicy -ne "Block" -or
-    $portFilter.Protocol -ne "TCP" -or
-    $localAddresses -notcontains $HostIPv4 -or
-    $remoteAddresses -notcontains $ClientIPv4 -or
-    $localPorts -notcontains "80" -or
-    $interfaces -notcontains $InterfaceAlias) {
-    throw "La regla '$ruleName' no coincide exactamente con las IP, interfaz y TCP/80 esperados; no se elimino."
-}
-
-$target = "regla '$ruleName' ($ClientIPv4 -> $HostIPv4 TCP/80, $InterfaceAlias)"
-if ($PSCmdlet.ShouldProcess($target, "Eliminar regla de Windows Firewall")) {
-    Remove-NetFirewallRule -Name $rule.Name -ErrorAction Stop
-    Write-Output "Regla eliminada: $ruleName"
+if ($removed -eq 0) {
+    Write-Output "No se elimino ninguna regla."
 }
