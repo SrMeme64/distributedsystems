@@ -63,6 +63,158 @@ eliminación comprueba IPs, interfaz y puerto antes de quitar la regla. No se
 elimina automáticamente: mantenerla es una decisión del operador mientras
 continúen las pruebas LAN.
 
+## PoC 1-3 desde la laptop cliente
+
+Estas son las tres pruebas del [`README.md`](../README.md) ejecutadas desde la
+segunda laptop. El host solo detiene y vuelve a iniciar contenedores; el cliente
+genera la carga y verifica las respuestas.
+
+**Requisitos en el cliente:** Windows 10/11, PowerShell 5.1 o superior, `curl.exe`
+y una copia de este repositorio. Si no tiene el repo, clónalo:
+
+```powershell
+git clone https://github.com/SrMeme64/distributedsystems.git
+cd distributedsystems
+```
+
+Si Windows bloquea los scripts, usa `powershell -ExecutionPolicy Bypass -File`
+en cada invocación (solo afecta a ese proceso).
+
+### Paso 0: confirmar la ruta cliente → host
+
+En el **host**, obtén su IP LAN:
+
+```powershell
+ipconfig | findstr /i "IPv4"
+```
+
+En el **cliente**, obtén tu IP y prueba el puerto 80 (sustituye `<IP_HOST>`):
+
+```powershell
+ipconfig | findstr /i "IPv4"
+Test-NetConnection <IP_HOST> -Port 80
+curl.exe -i http://<IP_HOST>/api/health
+```
+
+- `TcpTestSucceeded: True` y `HTTP/1.1 200 OK` → no hace falta tocar el firewall.
+- `TcpTestSucceeded: False` → en el host, PowerShell como administrador:
+
+  ```powershell
+  .\PoCs\Enable-LanPocFirewall.ps1 `
+    -HostIPv4 "<IP_HOST>" `
+    -ClientIPv4 "<IP_CLIENTE>" `
+    -InterfaceAlias "Wi-Fi" `
+    -AllowPublicProfile
+  ```
+
+  `-AllowPublicProfile` solo es necesario si la interfaz está clasificada como
+  `Public`. Vuelve a ejecutar `Test-NetConnection` hasta obtener `True`.
+
+### PoC 1: carga desde el cliente (sin instalar `ab`)
+
+En el **host**, vacía la caché:
+
+```powershell
+curl.exe -sS -o NUL -w "cache_clear HTTP %{http_code}`n" -X POST http://localhost/api/cache/clear
+```
+
+En el **cliente**, mide la caché fría y luego la caliente:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-LoadTest.ps1 `
+  -BaseUrl "http://<IP_HOST>" -Requests 1 -Concurrency 1
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-LoadTest.ps1 `
+  -BaseUrl "http://<IP_HOST>" -Requests 500 -Concurrency 20
+```
+
+**Cómo verificar:** en la salida, `Errores: 0`, `Codigos HTTP: 200=...`, y la
+caché caliente debe mostrar más `Req/s` y menor latencia que la fría. En la
+ejecución del 26-10-2026 desde el host se obtuvo 54.7 ms en frío y 926.38 req/s
+con 18.4 ms de media en caliente (20 de concurrencia).
+
+### PoC 2: failover simple desde el cliente
+
+En el **cliente**, línea base (3 sondeos):
+
+```powershell
+$baseUrl = "http://<IP_HOST>"
+1..3 | ForEach-Object {
+    curl.exe -sS -i "$baseUrl/api/health" |
+        Select-String -Pattern "^HTTP/|^x-request-trace:"
+    Start-Sleep -Milliseconds 500
+}
+```
+
+En el **host**, detén `app1`:
+
+```powershell
+docker compose --env-file .env.exam stop app1
+```
+
+En el **cliente**, 10 sondeos con `app1` caído:
+
+```powershell
+$ok = 0; $err = 0
+1..10 | ForEach-Object {
+    $r = curl.exe -sS -i --max-time 5 "$baseUrl/api/health" 2>&1
+    $status = ($r | Select-String -Pattern "^HTTP/").Line
+    $trace = ($r | Select-String -Pattern "^x-request-trace:").Line
+    if ($status -match "200") { $ok++ } else { $err++ }
+    "{0} | {1}" -f $status, $trace
+    Start-Sleep -Milliseconds 700
+}
+"HTTP 200: $ok | errores: $err"
+```
+
+En el **host**, recupera el nodo:
+
+```powershell
+docker compose --env-file .env.exam start app1
+```
+
+En el **cliente**, confirma que `app1` vuelve a la rotación:
+
+```powershell
+1..6 | ForEach-Object {
+    curl.exe -sS -i "$baseUrl/api/health" |
+        Select-String -Pattern "^HTTP/|^x-request-trace:"
+    Start-Sleep -Milliseconds 700
+}
+```
+
+**Cómo verificar:** durante la caída, `HTTP 200: 10 | errores: 0` y las trazas
+solo muestran `app2`/`app3`. Tras recuperar, la traza vuelve a incluir `app1`.
+En la convergencia inicial pueden aparecer timeouts; es esperado.
+
+### PoC 3: Chaos Engineering desde el cliente
+
+En el **cliente**, inicia el monitor (70 sondeos cada 500 ms, ~35 s):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Monitor-LanHealth.ps1 `
+  -HostIPv4 "<IP_HOST>" -RequestCount 70 -IntervalMilliseconds 500
+```
+
+Mientras el monitor imprime líneas, en el **host** inyecta la falla:
+
+```powershell
+$target = Get-Random -InputObject @("app1", "app2", "app3")
+Write-Host "Nodo seleccionado: $target"
+docker compose --env-file .env.exam stop $target
+try {
+    Start-Sleep -Seconds 15
+}
+finally {
+    docker compose --env-file .env.exam start $target
+}
+```
+
+**Cómo verificar:** al final, el monitor imprime una línea como
+`Resumen: 70 solicitudes, 68 HTTP 200, 2 errores, 97.1 % disponible`. Un valor
+alto de disponibilidad con pocos errores en la ventana de falla es el resultado
+esperado. Si el resumen no aparece, el monitor se interrumpió antes de terminar.
+
 ## Cómo repetir
 
 Desde PowerShell en la raíz del repositorio, después de confirmar la IP actual
@@ -153,5 +305,6 @@ cambiar entre sesiones.
 |---|---|
 | `Enable-LanPocFirewall.ps1` | Crea una regla de firewall limitada a TCP/80 entre host y cliente por la interfaz correcta. Requiere PowerShell como administrador. |
 | `Remove-LanPocFirewall.ps1` | Elimina la regla de firewall creada por `Enable-LanPocFirewall.ps1`. Verifica IPs, interfaz y puerto antes de quitar. |
-| `Monitor-LanHealth.ps1` | Monitoriza la API del host desde el cliente, imprimiendo HTTP status y traza de cada solicitud. |
+| `Monitor-LanHealth.ps1` | Monitoriza la API del host desde el cliente, imprimiendo HTTP status, traza y un resumen final de disponibilidad. |
+| `Invoke-LoadTest.ps1` | Genera carga HTTP desde el cliente sin instalar `ab`: solicitudes, concurrencia, req/s, latencias p50/p95/p99 y códigos HTTP. |
 | `Test-LanFailover.ps1` | Pausa el HAProxy master de la capa indicada, espera el failover al backup y luego recupera el master. |

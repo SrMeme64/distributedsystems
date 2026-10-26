@@ -230,6 +230,20 @@ docker run --rm --network distributed-three-tier_edge httpd:alpine `
 
 **Desde el cliente**, si prefiere ejecutar `ab` localmente, sustituya `http://presentation-entry` por `http://<IP_HOST>` (por ejemplo `http://192.168.1.72`). La IP del host cambia entre sesiones: consúltela con `ipconfig | findstr /i "IPv4"`.
 
+Si el cliente no tiene `ab`, use el script incluido (no requiere instalar nada):
+
+```powershell
+# Caché fría (ejecutar antes en el host: POST /api/cache/clear)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-LoadTest.ps1 `
+  -BaseUrl "http://<IP_HOST>" -Requests 1 -Concurrency 1
+
+# Caché caliente
+powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-LoadTest.ps1 `
+  -BaseUrl "http://<IP_HOST>" -Requests 500 -Concurrency 20
+```
+
+El script imprime solicitudes, concurrencia, req/s, latencia media, p50/p95/p99, errores y códigos HTTP.
+
 **Resultados (26-10-2026, host `192.168.1.72`):**
 
 | Escenario | Solicitudes | Concurrencia | Fallidas | Req/s | Tiempo medio |
