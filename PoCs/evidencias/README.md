@@ -12,6 +12,6 @@ Sugerencia de nombres:
 - `poc3-chaos-cliente-<fecha>.txt`
 - `poc3-chaos-host-<fecha>.txt`
 
-Cada PoC del [`README.md`](../README.md) documenta sus resultados en la sección
-**Resultados obtenidos**. Los de la ejecución del 26-10-2026 están resumidos en
-el [`README.md`](../README.md#resultados-principales).
+Cada PoC del [`README.md`](../README.md) describe sus métricas y el formato de
+captura. Los resultados integrados de la ejecución están en
+[`resilience-lab/RESULTADOS-PRUEBAS.md`](../../resilience-lab/RESULTADOS-PRUEBAS.md).

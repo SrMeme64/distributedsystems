@@ -1,4 +1,4 @@
-"""Dashboard that launches the resilience-lab tools and shows their results."""
+"""Panel para iniciar las herramientas del laboratorio y consultar sus resultados."""
 import csv
 import json
 import os
@@ -21,73 +21,78 @@ F = lambda key, label, default, kind="text", **kw: {"key": key, "label": label, 
 TOOLS = {
     "ab": {
         "title": "ApacheBench (ab)", "container": "lab-ab", "kind": "performance",
-        "description": "Fixed number of requests against one URL. Quick throughput/latency baseline.",
-        "runbook": ["Start the main stack and open this dashboard.",
-                    "Run the Smoke preset to confirm the target answers (0 failed requests).",
-                    "Run Load, then Stress; compare requests/s and p95/p99 across runs.",
-                    "Failed requests or Non-2xx responses point to saturation: check HAProxy/Nagios."],
-        "fields": [F("TARGET_URL", "Target URL", DEFAULT_TARGET + "/"),
-                   F("REQUESTS", "Total requests", 1000, "number", min=1, max=1000000),
-                   F("CONCURRENCY", "Concurrency", 20, "number", min=1, max=2000),
-                   F("TIMEOUT", "Timeout (s)", 30, "number", min=1, max=600),
-                   F("KEEPALIVE", "HTTP keep-alive", False, "bool")],
-        "presets": {"Smoke": {"REQUESTS": 100, "CONCURRENCY": 5}, "Load": {"REQUESTS": 5000, "CONCURRENCY": 50},
-                    "Stress": {"REQUESTS": 20000, "CONCURRENCY": 200}},
+        "description": "Envía un número fijo de solicitudes a una URL para medir la tasa de solicitudes y la latencia.",
+        "runbook": ["Inicia el stack principal y abre este panel.",
+                    "Ejecuta la prueba rápida para confirmar que el destino responde sin solicitudes fallidas.",
+                    "Ejecuta Carga y luego Estrés; compara solicitudes/s y p95/p99 entre ejecuciones.",
+                    "Las solicitudes fallidas o respuestas distintas de 2xx pueden indicar saturación: revisa HAProxy y Nagios."],
+        "fields": [F("TARGET_URL", "URL objetivo", DEFAULT_TARGET + "/"),
+                   F("REQUESTS", "Solicitudes totales", 1000, "number", min=1, max=1000000),
+                   F("CONCURRENCY", "Concurrencia", 20, "number", min=1, max=2000),
+                   F("TIMEOUT", "Tiempo límite (s)", 30, "number", min=1, max=600),
+                   F("KEEPALIVE", "Mantener conexión HTTP", False, "bool")],
+        "presets": {"Rápida": {"REQUESTS": 100, "CONCURRENCY": 5}, "Carga": {"REQUESTS": 5000, "CONCURRENCY": 50},
+                    "Estrés": {"REQUESTS": 20000, "CONCURRENCY": 200}},
     },
     "siege": {
         "title": "Siege", "container": "lab-siege", "kind": "performance",
-        "description": "Time-boxed load over a list of URLs with simulated users.",
-        "runbook": ["Enter one URL per line (web pages and /api/ calls).",
-                    "Run Smoke, then Load; leave benchmark mode on for max pressure or off to add think time.",
-                    "Check Availability (target >= 99%) and Response time / Longest transaction.",
-                    "Run it together with a Chaos Monkey run to see behaviour under failures."],
-        "fields": [F("URLS", "URLs (one per line)", f"{DEFAULT_TARGET}/\n{DEFAULT_TARGET}/api/health\n{DEFAULT_TARGET}/api/products/cheapest", "textarea"),
-                   F("CONCURRENCY", "Concurrent users", 20, "number", min=1, max=1000),
-                   F("DURATION", "Duration (s)", 30, "number", min=1, max=3600),
-                   F("BENCHMARK", "Benchmark mode (no delay)", True, "bool"),
-                   F("DELAY", "Max random delay (s)", 1, "number", min=0, max=60)],
-        "presets": {"Smoke": {"CONCURRENCY": 5, "DURATION": 10}, "Load": {"CONCURRENCY": 50, "DURATION": 60},
-                    "Stress": {"CONCURRENCY": 200, "DURATION": 60}},
+        "description": "Genera carga durante un tiempo definido sobre varias URL con usuarios simulados.",
+        "runbook": ["Introduce una URL por línea (páginas web y llamadas a /api/).",
+                    "Ejecuta Rápida y luego Carga; activa el modo de benchmark para máxima presión o desactívalo para añadir tiempo de espera.",
+                    "Revisa la disponibilidad (objetivo >= 99%), el tiempo de respuesta y la transacción más larga.",
+                    "Ejecuta en paralelo con Chaos Monkey para observar el comportamiento durante fallos."],
+        "fields": [F("URLS", "URL (una por línea)", f"{DEFAULT_TARGET}/\n{DEFAULT_TARGET}/api/health\n{DEFAULT_TARGET}/api/products/cheapest", "textarea"),
+                   F("CONCURRENCY", "Usuarios concurrentes", 20, "number", min=1, max=1000),
+                   F("DURATION", "Duración (s)", 30, "number", min=1, max=3600),
+                   F("BENCHMARK", "Modo benchmark (sin demora)", True, "bool"),
+                   F("DELAY", "Demora aleatoria máxima (s)", 1, "number", min=0, max=60)],
+        "presets": {"Rápida": {"CONCURRENCY": 5, "DURATION": 10}, "Carga": {"CONCURRENCY": 50, "DURATION": 60},
+                    "Estrés": {"CONCURRENCY": 200, "DURATION": 60}},
     },
     "jmeter": {
         "title": "Apache JMeter", "container": "lab-jmeter", "kind": "performance",
-        "description": "Thread-group scenario with ramp-up; produces a full HTML report.",
-        "runbook": ["Set the base URL and the request paths (one per line).",
-                    "Pick threads, ramp-up and duration; Smoke first, then Load.",
-                    "Review error %, percentiles and throughput here; open the full HTML report for graphs.",
-                    "Use think time to model real users; set it to 0 for raw capacity."],
-        "fields": [F("BASE_URL", "Base URL", DEFAULT_TARGET),
-                   F("PATHS", "Paths (one per line)", "/\n/api/health\n/api/products/cheapest", "textarea"),
-                   F("THREADS", "Threads (users)", 20, "number", min=1, max=1000),
-                   F("RAMPUP", "Ramp-up (s)", 5, "number", min=0, max=600),
-                   F("DURATION", "Duration (s)", 30, "number", min=1, max=3600),
-                   F("THINK_MS", "Think time (ms)", 0, "number", min=0, max=60000)],
-        "presets": {"Smoke": {"THREADS": 5, "DURATION": 15}, "Load": {"THREADS": 50, "RAMPUP": 10, "DURATION": 60},
-                    "Stress": {"THREADS": 200, "RAMPUP": 30, "DURATION": 90}},
+        "description": "Escenario con grupo de hilos y rampa de carga; genera un informe HTML completo.",
+        "runbook": ["Configura la URL base y las rutas de solicitud, una por línea.",
+                    "Elige los hilos, la rampa y la duración; comienza con Rápida y continúa con Carga.",
+                    "Revisa aquí el porcentaje de errores, los percentiles y el rendimiento en solicitudes por segundo; abre el informe HTML para ver las gráficas.",
+                    "Usa tiempo de espera para simular usuarios reales; establece 0 para medir capacidad máxima."],
+        "fields": [F("BASE_URL", "URL base", DEFAULT_TARGET),
+                   F("PATHS", "Rutas (una por línea)", "/\n/api/health\n/api/products/cheapest", "textarea"),
+                   F("THREADS", "Hilos (usuarios)", 20, "number", min=1, max=1000),
+                   F("RAMPUP", "Rampa de carga (s)", 5, "number", min=0, max=600),
+                   F("DURATION", "Duración (s)", 30, "number", min=1, max=3600),
+                   F("THINK_MS", "Tiempo de espera (ms)", 0, "number", min=0, max=60000)],
+        "presets": {"Rápida": {"THREADS": 5, "DURATION": 15}, "Carga": {"THREADS": 50, "RAMPUP": 10, "DURATION": 60},
+                    "Estrés": {"THREADS": 200, "RAMPUP": 30, "DURATION": 90}},
     },
     "chaosmonkey": {
         "title": "Chaos Monkey", "container": "lab-chaosmonkey", "kind": "resilience",
-        "description": "Randomly stops/kills/pauses project containers and measures user-visible availability.",
-        "runbook": ["Start with Dry run to see which containers would be hit.",
-                    "Pick a group: presentation-lb tests the VRRP failover, web/app test pool redundancy, galera/proxysql test the DB tier, mongodb tests the replica set, and redis-data/redis-sentinel test cache failover and quorum.",
-                    "Optionally start Siege/JMeter in parallel for load while faults are injected.",
-                    "Expect availability near 100% for redundant groups; a MongoDB or Redis fault may keep HTTP 200 while the response is marked degraded. Check /api/health and the X-Request-Trace header, not only the status code.",
-                    "All targets are restored automatically at the end or when stopped."],
-        "fields": [F("GROUP", "Target group", "web", "select",
-                     options=["web", "app", "presentation-lb", "application-lb", "galera", "proxysql", "mongodb", "redis", "redis-data", "redis-sentinel", "any"]),
-                   F("TARGETS", "Explicit services (comma separated, overrides group)", "", "text", required=False),
-                   F("ACTION", "Fault", "stop", "select", options=["stop", "kill", "pause"]),
-                   F("INTERVAL", "Seconds between faults", 20, "number", min=1, max=3600),
-                   F("DOWNTIME", "Seconds a victim stays down", 15, "number", min=1, max=3600),
-                   F("DURATION", "Total duration (s)", 90, "number", min=5, max=7200),
-                   F("MAX_CONCURRENT", "Max victims at once", 1, "number", min=1, max=5),
-                   F("PROBE_URL", "Availability probe URL", DEFAULT_TARGET + "/api/health"),
-                   F("DRY_RUN", "Dry run (do not touch containers)", False, "bool")],
-        "presets": {"Gentle": {"INTERVAL": 30, "DOWNTIME": 15, "DURATION": 90},
-                    "Aggressive": {"INTERVAL": 10, "DOWNTIME": 20, "DURATION": 120, "MAX_CONCURRENT": 2},
-                    "LB failover": {"GROUP": "presentation-lb", "INTERVAL": 30, "DOWNTIME": 20, "DURATION": 90},
-                    "MongoDB failover": {"GROUP": "mongodb", "INTERVAL": 30, "DOWNTIME": 20, "DURATION": 90},
-                    "Redis failover": {"GROUP": "redis-data", "INTERVAL": 30, "DOWNTIME": 20, "DURATION": 90}},
+        "description": "Detiene, mata o pausa contenedores del proyecto al azar y mide la disponibilidad observada por el usuario.",
+        "runbook": ["Comienza con la simulación para revisar qué contenedores serían afectados.",
+                    "Elige un grupo: presentation-lb comprueba el failover VRRP; web/app, la redundancia del pool; galera/proxysql, la capa de datos; mongodb, el replica set; redis-data/redis-sentinel, el failover de caché y el quórum.",
+                    "Opcionalmente, inicia Siege/JMeter en paralelo para generar carga durante la inyección de fallas.",
+                    "Se espera una disponibilidad cercana al 100% para grupos redundantes. Una falla de MongoDB o Redis puede conservar HTTP 200 y marcar la respuesta como degradada. Revisa /api/health y X-Request-Trace, no solo el código HTTP.",
+                    "Los objetivos se restauran automáticamente al terminar o detener la prueba."],
+        "fields": [F("GROUP", "Grupo objetivo", "web", "select",
+                     options=["web", "app", "presentation-lb", "application-lb", "galera", "proxysql", "mongodb", "redis", "redis-data", "redis-sentinel", "any"],
+                     option_labels={"web": "Nodos web", "app": "Nodos de aplicación", "presentation-lb": "Balanceadores de presentación",
+                                    "application-lb": "Balanceadores de aplicación", "galera": "Clúster Galera", "proxysql": "ProxySQL",
+                                    "mongodb": "Replica set MongoDB", "redis": "Redis", "redis-data": "Nodos de datos Redis",
+                                    "redis-sentinel": "Centinelas Redis", "any": "Todos los grupos"}),
+                   F("TARGETS", "Servicios concretos (separados por coma; reemplaza el grupo)", "", "text", required=False),
+                   F("ACTION", "Tipo de falla", "stop", "select", options=["stop", "kill", "pause"],
+                     option_labels={"stop": "Detener", "kill": "Terminar", "pause": "Pausar"}),
+                   F("INTERVAL", "Segundos entre fallas", 20, "number", min=1, max=3600),
+                   F("DOWNTIME", "Segundos que dura la falla", 15, "number", min=1, max=3600),
+                   F("DURATION", "Duración total (s)", 90, "number", min=5, max=7200),
+                   F("MAX_CONCURRENT", "Máximo de víctimas simultáneas", 1, "number", min=1, max=5),
+                   F("PROBE_URL", "URL para comprobar disponibilidad", DEFAULT_TARGET + "/api/health"),
+                   F("DRY_RUN", "Simulación (no afecta contenedores)", False, "bool")],
+        "presets": {"Suave": {"INTERVAL": 30, "DOWNTIME": 15, "DURATION": 90},
+                    "Intenso": {"INTERVAL": 10, "DOWNTIME": 20, "DURATION": 120, "MAX_CONCURRENT": 2},
+                    "Failover de balanceador": {"GROUP": "presentation-lb", "INTERVAL": 30, "DOWNTIME": 20, "DURATION": 90},
+                    "Failover de MongoDB": {"GROUP": "mongodb", "INTERVAL": 30, "DOWNTIME": 20, "DURATION": 90},
+                    "Failover de Redis": {"GROUP": "redis-data", "INTERVAL": 30, "DOWNTIME": 20, "DURATION": 90}},
     },
 }
 
@@ -100,27 +105,27 @@ def clean_params(tool, raw):
             try:
                 v = float(v)
             except (TypeError, ValueError):
-                raise ValueError(f"{f['label']} must be a number")
+                raise ValueError(f"{f['label']} debe ser un número")
             if not f["min"] <= v <= f["max"]:
-                raise ValueError(f"{f['label']} must be between {f['min']} and {f['max']}")
+                raise ValueError(f"{f['label']} debe estar entre {f['min']} y {f['max']}")
             v = str(int(v)) if v == int(v) else str(v)
         elif f["type"] == "bool":
             v = "true" if v in (True, "true", "on", 1) else "false"
         elif f["type"] == "select":
             if v not in f["options"]:
-                raise ValueError(f"{f['label']} is invalid")
+                raise ValueError(f"{f['label']} no es válido")
         else:
             v = str(v).strip()
             if not v and f.get("required", True):
-                raise ValueError(f"{f['label']} is required")
+                raise ValueError(f"{f['label']} es obligatorio")
             if f["key"] in ("TARGET_URL", "PROBE_URL", "BASE_URL") and not re.match(r"^https?://[^\s]+$", v):
-                raise ValueError(f"{f['label']} must be an http(s) URL")
+                raise ValueError(f"{f['label']} debe ser una URL http(s)")
             if f["key"] == "TARGETS" and v and not re.match(r"^[\w.,\- ]+$", v):
-                raise ValueError("Explicit services contain invalid characters")
+                raise ValueError("Los servicios especificados contienen caracteres no válidos")
             if f["key"] in ("URLS",) and any(not re.match(r"^https?://\S+$", u.strip()) for u in v.splitlines() if u.strip()):
-                raise ValueError("Every URL must start with http:// or https://")
+                raise ValueError("Cada URL debe comenzar con http:// o https://")
             if f["key"] == "PATHS" and any(not u.strip().startswith("/") for u in v.splitlines() if u.strip()):
-                raise ValueError("Every path must start with /")
+                raise ValueError("Cada ruta debe comenzar con /")
         params[f["key"]] = v
     if tool == "jmeter":
         u = urlparse(params.pop("BASE_URL"))
@@ -186,27 +191,28 @@ def num(s):
 def parse_ab(text, out):
     m = {}
     patterns = {
-        "Requests/s": r"Requests per second:\s+([\d.]+)",
-        "Mean latency ms": r"Time per request:\s+([\d.]+) \[ms\] \(mean\)\n",
-        "Completed requests": r"Complete requests:\s+(\d+)",
-        "Failed requests": r"Failed requests:\s+(\d+)",
-        "Non-2xx responses": r"Non-2xx responses:\s+(\d+)",
-        "Transfer rate KB/s": r"Transfer rate:\s+([\d.]+)",
-        "Total time s": r"Time taken for tests:\s+([\d.]+)",
+        "Solicitudes/s": r"Requests per second:\s+([\d.]+)",
+        "Latencia media ms": r"Time per request:\s+([\d.]+) \[ms\] \(mean\)\n",
+        "Solicitudes completadas": r"Complete requests:\s+(\d+)",
+        "Solicitudes fallidas": r"Failed requests:\s+(\d+)",
+        "Respuestas distintas de 2xx": r"Non-2xx responses:\s+(\d+)",
+        "Transferencia KB/s": r"Transfer rate:\s+([\d.]+)",
+        "Duración total s": r"Time taken for tests:\s+([\d.]+)",
     }
     for label, pat in patterns.items():
         r = re.search(pat, text)
-        m[label] = num(r.group(1)) if r else (0 if label == "Non-2xx responses" else None)
+        m[label] = num(r.group(1)) if r else (0 if label == "Respuestas distintas de 2xx" else None)
     pct = {f"p{p}": num(v) for p, v in re.findall(r"^\s+(\d+)%\s+(\d+)", text, re.M)}
     return {"metrics": m, "percentiles": pct, "unit": "ms"}
 
 
 def parse_siege(text, out):
-    labels = {"Transactions": "Transactions", "Availability": "Availability %", "Elapsed time": "Elapsed s",
-              "Data transferred": "Data MB", "Response time": "Avg response s", "Transaction rate": "Transactions/s",
-              "Throughput": "Throughput MB/s", "Concurrency": "Avg concurrency",
-              "Successful transactions": "Successful", "Failed transactions": "Failed",
-              "Longest transaction": "Longest s", "Shortest transaction": "Shortest s"}
+    labels = {"Transactions": "Transacciones", "Availability": "Disponibilidad %",
+              "Elapsed time": "Tiempo transcurrido s", "Data transferred": "Datos transferidos MB",
+              "Response time": "Tiempo medio de respuesta s", "Transaction rate": "Transacciones/s",
+              "Throughput": "Caudal MB/s", "Concurrency": "Concurrencia media",
+              "Successful transactions": "Transacciones exitosas", "Failed transactions": "Transacciones fallidas",
+              "Longest transaction": "Transacción más larga s", "Shortest transaction": "Transacción más corta s"}
     m = {}
     for key, val in re.findall(r"^([A-Za-z ]+):\s+([\d.,]+)", text, re.M):
         if key.strip() in labels:
@@ -218,7 +224,7 @@ def parse_jmeter(text, out):
     path = os.path.join(out, "results.jtl")
     rows = list(csv.DictReader(open(path))) if os.path.exists(path) else []
     if not rows:
-        return {"metrics": {}, "error": "JMeter produced no samples"}
+        return {"metrics": {}, "error": "JMeter no produjo muestras"}
     el = sorted(int(r["elapsed"]) for r in rows)
     ts = [int(r["timeStamp"]) for r in rows]
     span = max((max(ts) + int(rows[ts.index(max(ts))]["elapsed"]) - min(ts)) / 1000, 0.001)
@@ -231,9 +237,9 @@ def parse_jmeter(text, out):
         s["err"] += r["success"] != "true"
         s["sum"] += int(r["elapsed"])
     return {
-        "metrics": {"Samples": len(rows), "Errors": errors, "Error %": round(100 * errors / len(rows), 2),
-                    "Throughput req/s": round(len(rows) / span, 2), "Avg ms": round(sum(el) / len(el), 1),
-                    "Min ms": el[0], "Max ms": el[-1]},
+        "metrics": {"Muestras": len(rows), "Errores": errors, "Errores %": round(100 * errors / len(rows), 2),
+                    "Throughput req/s": round(len(rows) / span, 2),
+                    "Media ms": round(sum(el) / len(el), 1), "Mínimo ms": el[0], "Máximo ms": el[-1]},
         "percentiles": {"p50": pick(50), "p90": pick(90), "p95": pick(95), "p99": pick(99)},
         "unit": "ms",
         "table": [{"label": k, "samples": v["n"], "errors": v["err"], "avg_ms": round(v["sum"] / v["n"], 1)}
@@ -248,7 +254,7 @@ def build_summary(meta):
         p = os.path.join(out, "summary.json")
         if os.path.exists(p):
             return json.load(open(p))
-        return {"metrics": {}, "error": "no summary produced (see console log)"}
+        return {"metrics": {}, "error": "No se generó un resumen; consulta la consola."}
     text = open(os.path.join(out, "console.log"), errors="replace").read()
     return {"ab": parse_ab, "siege": parse_siege, "jmeter": parse_jmeter}[meta["tool"]](text, out)
 
@@ -265,7 +271,7 @@ def api_start():
     body = request.get_json(force=True, silent=True) or {}
     tool = body.get("tool")
     if tool not in TOOLS:
-        return jsonify(error="unknown tool"), 400
+        return jsonify(error="Herramienta desconocida"), 400
     try:
         params = clean_params(tool, body.get("params", {}))
     except ValueError as e:
@@ -317,7 +323,7 @@ def api_stop(run_id):
     with lock:
         active = run_id in procs
     if not meta or not active:
-        return jsonify(error="run is not active"), 404
+        return jsonify(error="La ejecución no está activa"), 404
     meta["status"] = "stopping"
     write_meta(meta)
     container = TOOLS[meta["tool"]]["container"]

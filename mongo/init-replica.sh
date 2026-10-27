@@ -15,20 +15,21 @@ AUTH=(
   --authenticationDatabase admin
 )
 
-if ! mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q 1; then
-  echo "No matching admin user found; creating the first root user through the localhost exception."
-  mongosh --quiet --host "$MONGO_HOST" --eval "
-    const admin = db.getSiblingDB('admin');
-    admin.createUser({
-      user: process.env.MONGO_ROOT_USERNAME,
-      pwd: process.env.MONGO_ROOT_PASSWORD,
-      roles: ['root'],
-    });
-  "
+AUTHENTICATED=false
+if mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q 1; then
+  AUTHENTICATED=true
 fi
 
+mongo_shell() {
+  if [ "$AUTHENTICATED" = true ]; then
+    mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" "$@"
+  else
+    mongosh --quiet --host "$MONGO_HOST" "$@"
+  fi
+}
+
 echo "Initiating replica set ${MONGO_REPLICA_SET}..."
-mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" --eval "
+mongo_shell --eval "
   try {
     rs.initiate({
       _id: '${MONGO_REPLICA_SET}',
@@ -47,12 +48,32 @@ mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" --eval "
 
 echo "Waiting for a writable primary..."
 for _ in $(seq 1 60); do
-  if mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" --eval 'db.hello().isWritablePrimary' | grep -q true; then
-    echo "Replica set ${MONGO_REPLICA_SET} has a primary."
-    exit 0
+  if mongo_shell --eval 'db.hello().isWritablePrimary' | grep -q true; then
+    break
   fi
   sleep 2
 done
 
-echo "Timed out waiting for the replica set primary." >&2
-exit 1
+if ! mongo_shell --eval 'db.hello().isWritablePrimary' | grep -q true; then
+  echo "Timed out waiting for the replica set primary." >&2
+  exit 1
+fi
+
+if [ "$AUTHENTICATED" = false ]; then
+  echo "Creating the initial administrator on the writable primary..."
+  mongo_shell --eval "
+    const admin = db.getSiblingDB('admin');
+    admin.createUser({
+      user: process.env.MONGO_ROOT_USERNAME,
+      pwd: process.env.MONGO_ROOT_PASSWORD,
+      roles: ['root'],
+    });
+  "
+fi
+
+if ! mongosh --quiet --host "$MONGO_HOST" "${AUTH[@]}" --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q 1; then
+  echo "MongoDB administrator authentication failed after initialization." >&2
+  exit 1
+fi
+
+echo "Replica set ${MONGO_REPLICA_SET} has a writable primary."

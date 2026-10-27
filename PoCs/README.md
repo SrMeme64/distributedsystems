@@ -7,9 +7,11 @@ Scripts para ejecutar las tres PoC del proyecto desde una laptop externa
 - el **host** ejecuta el script que provoca la falla y la restaura.
 
 El cliente no ejecuta Docker y el host no genera la carga. Los resultados de la
-última ejecución están documentados en el
-[`README.md`](../README.md#resultados-principales) y las capturas se guardan en
-[`evidencias/`](evidencias/), excluida de Git salvo su propio README.
+ejecución LAN del 26-10-2026 se resumen aquí; el informe integrado de las
+pruebas del plan 1–5 está en
+[`resilience-lab/RESULTADOS-PRUEBAS.md`](../resilience-lab/RESULTADOS-PRUEBAS.md).
+Las evidencias locales se guardan en [`evidencias/`](evidencias/), excluida de
+Git salvo su propio README.
 
 | PoC | Resultado |
 |---|---|
@@ -17,8 +19,9 @@ El cliente no ejecuta Docker y el host no genera la carga. Los resultados de la
 | 2. Failover por capas | **3/3 PASS**; 115/120 sondeos `200` (**95.8 %**) |
 | 3. Caos | **69/70 sondeos `200`** (**98.6 %**), nodo restaurado |
 
-La descripción completa de cada PoC y sus resultados están en el
-[`README.md`](../README.md#cómo-se-ejecutan-las-poc).
+La descripción completa de cada PoC y sus resultados están en este documento.
+El [README principal](../README.md) explica la arquitectura y enlaza el plan,
+el laboratorio y el informe de resultados.
 
 ## Topología
 
@@ -98,7 +101,7 @@ Abre dos terminales: una en el cliente y otra en el host.
 
 ## PoC 1: carga desde el cliente
 
-Mide latencia y throughput del catálogo con caché fría y caliente.
+Mide la latencia y el caudal del catálogo con caché fría y caliente.
 
 **En el host**, vacía la caché:
 
@@ -116,18 +119,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-LoadTest.ps1 `
   -BaseUrl "http://<IP_HOST>" -Requests 500 -Concurrency 20
 ```
 
-Opcional, para ver el punto de saturación: repite la carga caliente con
-`-Concurrency 10` y `-Concurrency 50`. No hace falta instalar `ab`.
-
-### Qué capturar
-
-| Escenario | Solicitudes | Concurrencia | Fallidas | Req/s | Tiempo medio | p95 |
-|---|---|---|---|---|---|---|
-| Caché fría | 1 | 1 | | | | |
-| Caché caliente | 500 | 20 | | | | |
-| Caché caliente (opcional) | 500 | 50 | | | | |
-
-Guarda la salida completa en `PoCs/evidencias/poc1-carga-<fecha>.txt`.
+Opcionalmente, compara más niveles de concurrencia dentro de los límites
+acordados para el host. No hace falta instalar `ab`. Guarda la salida completa
+en `PoCs/evidencias/poc1-carga-<fecha>.txt` y registra solicitudes,
+concurrencia, errores, códigos HTTP, req/s y percentiles para comparar caché
+fría y caliente.
 
 ## PoC 2: failover por capas
 
@@ -170,19 +166,12 @@ Para probar una sola capa:
 
 Para revisar sin tocar nada: añade `-WhatIf`.
 
-### Qué capturar
-
-| Fase | Traza antes | Cambio observado | Tiempo de failover | Vuelta al master | HTTP 200 / errores |
-|---|---|---|---|---|---|
-| API (`app1`) | | | | | |
-| Presentación | | | | | |
-| Aplicación | | | | | |
-
 Guarda la salida del monitor en
 `PoCs/evidencias/poc2-failover-cliente-<fecha>.txt` y el resumen del host en
-`PoCs/evidencias/poc2-failover-host-<fecha>.txt`.
+`PoCs/evidencias/poc2-failover-host-<fecha>.txt`. Registra la traza antes y
+después, el tiempo de detección y recuperación, solicitudes exitosas y errores.
 
-## PoC 3: Chaos Engineering
+## PoC 3: ingeniería del caos
 
 Inyecta una falla aleatoria en una réplica API durante 15 s y mide la
 disponibilidad desde el cliente.
@@ -205,15 +194,33 @@ El script elige `app1`, `app2` o `app3` al azar, lo detiene y **siempre** lo
 restaura en un bloque `finally`. Después espera a que HAProxy lo marque `UP`.
 Para fijar el nodo: `-Target app2`. Para revisar sin cambios: `-WhatIf`.
 
-### Qué capturar
-
-| Nodo | Ventana de falla | Sondeos | HTTP 200 | Errores | Disponibilidad | Vuelta a rotación |
-|---|---|---|---|---|---|---|
-| | | | | | | |
-
 Guarda la salida del monitor y la del host en
 `PoCs/evidencias/poc3-chaos-cliente-<fecha>.txt` y
-`PoCs/evidencias/poc3-chaos-host-<fecha>.txt`.
+`PoCs/evidencias/poc3-chaos-host-<fecha>.txt`. Registra el nodo afectado, la
+duración de la falla, sondeos correctos, errores, disponibilidad y retorno a
+la rotación.
+
+## Pruebas complementarias del plan y del laboratorio
+
+Las tres PoC anteriores se enfocan en carga desde la LAN, failover de API y
+balanceadores, y una falla controlada de API. El plan incluye además pruebas
+funcionales y escenarios de otras capas; se describen en
+[`resilience-lab/TEST-PLAN.md`](../resilience-lab/TEST-PLAN.md) y se ejecutan
+con las herramientas del
+[laboratorio de resiliencia](../resilience-lab/README.md).
+
+| Grupo adicional | Cobertura |
+|---|---|
+| Línea base funcional | Readiness, salud de dependencias, trazas, consistencia de Galera, réplica MongoDB y degradación de Redis. |
+| Rendimiento | Humo, carga sostenida, estrés gradual con límites acordados, pico y resistencia; medición del efecto de caché y de cada capa. ApacheBench, Siege y JMeter están disponibles en el dashboard. |
+| Failover de datos | Writer y réplicas Galera, ProxySQL, primario/secundario MongoDB, maestro Redis y quórum Sentinel; verificar recuperación entre escenarios. |
+| Caos | Simulación y, con autorización, falla real de un grupo objetivo; fallas de red, recursos o dependencia requieren un experimento acotado y preparación propia. |
+| Observabilidad | Nagios, logs, `/api/health`, `X-Request-Trace`, tiempo de detección y tiempo de recuperación. |
+
+No todos los casos del plan tienen un script PoC individual. Los resultados
+disponibles y el estado de cada área se consultan en
+[`RESULTADOS-PRUEBAS.md`](../resilience-lab/RESULTADOS-PRUEBAS.md); la lista de
+cobertura no significa que todos los casos se hayan ejecutado.
 
 ## Apagado y arranque
 
@@ -232,8 +239,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-Stack.ps1
 `stop_grace_period` (60 s en Galera, 45 s en MongoDB, 20 s en las API). Los
 contenedores quedan `Exited (0)` y los datos permanecen en sus volúmenes.
 `Start-Stack.ps1` espera a Docker, levanta el stack y valida con
-`Test-StackHealth.ps1`. El detalle está en
-[Apagado y arranque](../README.md#apagado-y-arranque).
+`Test-StackHealth.ps1`. La guía general está en
+[validación y recuperación](../README.md#validación-rápida-y-recuperación).
 
 ## Scripts incluidos
 
@@ -257,14 +264,10 @@ salvo su propio `README.md`, así que puedes pegar texto, CSV o capturas sin
 ensuciar el repositorio. La convención de nombres está en
 [`evidencias/README.md`](evidencias/README.md).
 
-Capturas de la ejecución del 26-10-2026:
-
-- `poc1-carga-cliente-2026-10-26.jpeg` y `poc1-carga-host-2026-10-26.jpeg`
-- `poc2-failover-cliente-2026-10-26.txt` y `poc2-failover-host-2026-10-26.txt`
-- `poc3-chaos-cliente-2026-10-26.txt` y `poc3-chaos-host-2026-10-26.txt`
-
-Los resultados de las tres PoC están resumidos en el
-[`README.md`](../README.md#resultados-principales).
+La captura versionada del dashboard está en
+[`resilience-lab/panel-laboratorio.png`](../resilience-lab/panel-laboratorio.png).
+Los resultados y métricas de las ejecuciones LAN están resumidos en este
+documento y el informe general.
 
 ## Si Windows bloquea los scripts
 

@@ -3,6 +3,14 @@ const $ = (s) => document.querySelector(s);
 const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmt = (ts) => new Date(ts * 1000).toLocaleString();
+const statusLabel = (s) => ({ running: 'En curso', stopping: 'Deteniendo', stopped: 'Detenida', finished: 'Finalizada', failed: 'Fallida', interrupted: 'Interrumpida' }[s] || s);
+const metricLabel = (s) => ({
+  'Availability %': 'Disponibilidad %', 'Faults injected': 'Fallas inyectadas',
+  'Requests/s': 'Solicitudes/s', 'Failed requests': 'Solicitudes fallidas',
+  'Error %': 'Errores %', 'Throughput req/s': 'Tasa de solicitudes/s',
+  'Latency percentiles': 'Percentiles de latencia', 'Availability probes': 'Sondeos de disponibilidad',
+  'Chaos events': 'Eventos de caos'
+}[s] || s);
 
 async function init() {
   TOOLS = await (await fetch('/api/tools')).json();
@@ -25,15 +33,15 @@ function renderTool() {
   const fields = t.fields.map((f) => {
     const id = `f-${f.key}`;
     if (f.type === 'bool') return `<div class="check"><input type="checkbox" id="${id}" ${f.default ? 'checked' : ''}><label for="${id}">${esc(f.label)}</label></div>`;
-    if (f.type === 'select') return `<div><label>${esc(f.label)}</label><select id="${id}">${f.options.map((o) => `<option ${o === f.default ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`;
+    if (f.type === 'select') return `<div><label>${esc(f.label)}</label><select id="${id}">${f.options.map((o) => `<option value="${esc(o)}" ${o === f.default ? 'selected' : ''}>${esc(f.option_labels?.[o] || o)}</option>`).join('')}</select></div>`;
     if (f.type === 'textarea') return `<div class="wide"><label>${esc(f.label)}</label><textarea id="${id}">${esc(f.default)}</textarea></div>`;
     return `<div><label>${esc(f.label)}</label><input id="${id}" type="${f.type}" value="${esc(f.default)}" ${f.min !== undefined ? `min="${f.min}" max="${f.max}"` : ''}></div>`;
   }).join('');
   const presets = Object.keys(t.presets).map((p) => `<button class="ghost" data-preset="${esc(p)}">${esc(p)}</button>`).join('');
   $('#tool').innerHTML = `<h2>${esc(t.title)}</h2><p>${esc(t.description)}</p>
     <div class="grid">${fields}</div>
-    <div class="actions"><button class="primary" id="launch">Launch test</button><span>Presets:</span>${presets}<span id="msg" class="err"></span></div>
-    <details><summary>Runbook</summary><ol>${t.runbook.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></details>`;
+    <div class="actions"><button class="primary" id="launch">Iniciar prueba</button><span>Perfiles:</span>${presets}<span id="msg" class="err"></span></div>
+    <details><summary>Instrucciones</summary><ol>${t.runbook.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></details>`;
   $('#launch').onclick = launch;
   document.querySelectorAll('[data-preset]').forEach((b) => b.onclick = () => {
     for (const [k, v] of Object.entries(t.presets[b.dataset.preset])) { const i = $(`#f-${k}`); if (i) i.value = v; }
@@ -76,22 +84,22 @@ function bars(p, unit) {
 function renderRun(run) {
   const s = run.summary || {}, panel = $('#result'); panel.hidden = false;
   const active = ['running', 'stopping'].includes(run.status);
-  let html = `<h2>${esc(TOOLS[run.tool].title)} <span class="badge ${run.status}">${run.status}</span> <small>${esc(run.id)}</small></h2>`;
-  html += `<div class="actions">${active ? '<button class="danger" id="stop">Stop</button>' : ''}</div>`;
+  let html = `<h2>${esc(TOOLS[run.tool].title)} <span class="badge ${run.status}">${esc(statusLabel(run.status))}</span> <small>${esc(run.id)}</small></h2>`;
+  html += `<div class="actions">${active ? '<button class="danger" id="stop">Detener</button>' : ''}</div>`;
   if (s.error) html += `<p class="err">${esc(s.error)}</p>`;
   const m = Object.entries(s.metrics || {});
-  if (m.length) html += `<h3>Output data</h3><div class="cards">${m.map(([k, v]) => `<div class="card"><b>${esc(v ?? 'n/a')}</b><span>${esc(k)}</span></div>`).join('')}</div>`;
-  if (s.percentiles && Object.keys(s.percentiles).length) html += `<h3>Latency percentiles</h3>${bars(s.percentiles, s.unit)}`;
-  if (s.table) html += `<h3>Per request</h3><table><tr><th>Request</th><th>Samples</th><th>Errors</th><th>Avg ms</th></tr>${s.table.map((r) => `<tr><td>${esc(r.label)}</td><td>${r.samples}</td><td>${r.errors}</td><td>${r.avg_ms}</td></tr>`).join('')}</table>`;
+  if (m.length) html += `<h3>Resultados</h3><div class="cards">${m.map(([k, v]) => `<div class="card"><b>${esc(v ?? 'n/d')}</b><span>${esc(metricLabel(k))}</span></div>`).join('')}</div>`;
+  if (s.percentiles && Object.keys(s.percentiles).length) html += `<h3>Percentiles de latencia</h3>${bars(s.percentiles, s.unit)}`;
+  if (s.table) html += `<h3>Detalle por solicitud</h3><table><tr><th>Solicitud</th><th>Muestras</th><th>Errores</th><th>Media ms</th></tr>${s.table.map((r) => `<tr><td>${esc(r.label)}</td><td>${r.samples}</td><td>${r.errors}</td><td>${r.avg_ms}</td></tr>`).join('')}</table>`;
   if (s.timeline && s.timeline.length) {
     const max = Math.max(...s.timeline.map((p) => p.ms), 1);
-    html += `<h3>Availability probes (red = failed)</h3><div class="timeline">${s.timeline.map((p) => `<div class="${p.ok ? '' : 'bad'}" style="height:${Math.max(8, 100 * p.ms / max)}%" title="${p.t}s ${p.ms}ms"></div>`).join('')}</div>`;
+    html += `<h3>Sondeos de disponibilidad (rojo = error)</h3><div class="timeline">${s.timeline.map((p) => `<div class="${p.ok ? '' : 'bad'}" style="height:${Math.max(8, 100 * p.ms / max)}%" title="${p.t}s ${p.ms}ms"></div>`).join('')}</div>`;
   }
-  if (s.events && s.events.length) html += `<h3>Chaos events</h3><table><tr><th>t (s)</th><th>Action</th><th>Service</th><th></th></tr>${s.events.map((e) => `<tr><td>${e.t}</td><td>${esc(e.action)}</td><td>${esc(e.service)}</td><td class="${e.ok ? '' : 'err'}">${esc(e.detail)}</td></tr>`).join('')}</table>`;
-  html += `<h3>Input parameters</h3><pre>${esc(JSON.stringify(run.params, null, 2))}</pre>`;
-  html += `<h3>Console</h3><pre id="console">${esc(run.console)}</pre>`;
+  if (s.events && s.events.length) html += `<h3>Eventos de caos</h3><table><tr><th>Tiempo (s)</th><th>Acción</th><th>Servicio</th><th>Detalle</th></tr>${s.events.map((e) => `<tr><td>${e.t}</td><td>${esc(e.action)}</td><td>${esc(e.service)}</td><td class="${e.ok ? '' : 'err'}">${esc(e.detail)}</td></tr>`).join('')}</table>`;
+  html += `<h3>Parámetros de entrada</h3><pre>${esc(JSON.stringify(run.params, null, 2))}</pre>`;
+  html += `<h3>Consola</h3><pre id="console">${esc(run.console)}</pre>`;
   const links = (run.files || []).map((f) => `<a class="btn" href="/files/${run.id}/${f}?download=1">${esc(f)}</a>`);
-  if (s.report) links.unshift(`<a class="btn" target="_blank" href="/files/${run.id}/report/index.html">Open JMeter HTML report</a>`);
+  if (s.report) links.unshift(`<a class="btn" target="_blank" href="/files/${run.id}/report/index.html">Abrir informe HTML de JMeter</a>`);
   html += `<div class="links">${links.join('')}</div>`;
   panel.innerHTML = html;
   const c = $('#console'); c.scrollTop = c.scrollHeight;
@@ -100,13 +108,13 @@ function renderRun(run) {
 
 function keyResult(r) {
   const m = (r.summary || {}).metrics || {};
-  const pick = { ab: ['Requests/s', 'Failed requests'], siege: ['Availability %', 'Transactions/s'], jmeter: ['Throughput req/s', 'Error %'], chaosmonkey: ['Availability %', 'Faults injected'] }[r.tool];
-  return pick.filter((k) => m[k] !== undefined).map((k) => `${k}: ${m[k]}`).join(' · ');
+  const pick = { ab: ['Solicitudes/s', 'Solicitudes fallidas'], siege: ['Disponibilidad %', 'Transacciones/s'], jmeter: ['Throughput req/s', 'Errores %'], chaosmonkey: ['Availability %', 'Faults injected'] }[r.tool];
+  return pick.filter((k) => m[k] !== undefined).map((k) => `${metricLabel(k)}: ${m[k]}`).join(' · ');
 }
 
 async function refreshHistory() {
   const runs = await (await fetch('/api/runs')).json();
-  $('#history tbody').innerHTML = runs.map((r) => `<tr><td>${fmt(r.started)}</td><td>${esc(TOOLS[r.tool]?.title || r.tool)}</td><td><span class="badge ${r.status}">${r.status}</span></td><td>${esc(keyResult(r))}</td><td><button class="ghost" data-run="${r.id}">View</button></td></tr>`).join('');
+  $('#history tbody').innerHTML = runs.map((r) => `<tr><td>${fmt(r.started)}</td><td>${esc(TOOLS[r.tool]?.title || r.tool)}</td><td><span class="badge ${r.status}">${esc(statusLabel(r.status))}</span></td><td>${esc(keyResult(r))}</td><td><button class="ghost" data-run="${r.id}">Ver</button></td></tr>`).join('');
   document.querySelectorAll('[data-run]').forEach((b) => b.onclick = () => showRun(b.dataset.run));
 }
 

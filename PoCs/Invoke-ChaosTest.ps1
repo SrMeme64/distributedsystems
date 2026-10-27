@@ -54,10 +54,12 @@ function Wait-ForServiceUp {
 function Get-HaproxyEvent {
     param(
         [string]$Pattern,
-        [int]$Tail = 400
+        [int]$Tail = 400,
+        [datetime]$Since = (Get-Date).AddMinutes(-5)
     )
 
-    & docker logs --tail $Tail distributed-three-tier-application-lb-master-1 2>&1 |
+    $sinceUtc = $Since.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+    & docker logs --since $sinceUtc --tail $Tail distributed-three-tier-application-lb-master-1 2>&1 |
         Select-String -Pattern $Pattern |
         Select-Object -Last 1
 }
@@ -90,6 +92,7 @@ $downEvent = $null
 $downAt = $null
 $upEvent = $null
 $upAt = $null
+$restoredAt = $null
 $probesWhileDown = 0
 $okWhileDown = 0
 $errorsWhileDown = 0
@@ -119,7 +122,7 @@ try {
 
         while ((Get-Date) -lt $holdDeadline) {
             if (-not $downEvent) {
-                $downEvent = Get-HaproxyEvent -Pattern $downPattern
+                $downEvent = Get-HaproxyEvent -Pattern $downPattern -Since $stoppedAt
                 if ($downEvent) {
                     $downAt = Get-Date
                     Write-Host "HAProxy: $($downEvent.Line.Trim())"
@@ -161,8 +164,9 @@ try {
             Write-Warning "up -d --no-deps fallo (exit $LASTEXITCODE); probando docker start"
             & docker start "distributed-three-tier-$Target-1" *> $null
         }
+        $restoredAt = Get-Date
 
-        $status = Wait-ForServiceUp -Service $Target -TimeoutSeconds 30
+        $status = Wait-ForServiceUp -Service $Target -TimeoutSeconds 60
         if ($status -and $status -match "\|Up") {
             Write-Host "Estado: $status"
         } else {
@@ -172,9 +176,9 @@ try {
 
         # HAProxy needs two successful checks (rise 2, 2 s interval).
         $upPattern = "application_nodes/$Target is UP"
-        $deadline = (Get-Date).AddSeconds(30)
+        $deadline = (Get-Date).AddSeconds(60)
         while (-not $upEvent -and (Get-Date) -lt $deadline) {
-            $upEvent = Get-HaproxyEvent -Pattern $upPattern
+            $upEvent = Get-HaproxyEvent -Pattern $upPattern -Since $restoredAt
             if (-not $upEvent) {
                 Start-Sleep -Seconds 2
             }
@@ -205,6 +209,7 @@ try {
             Start-Sleep -Milliseconds 700
         }
         if (-not $seen) {
+            $exitCode = 1
             Write-Warning "No se observo $Target en la traza tras la recuperacion. Ultima traza: $finalTrace"
         }
     } else {
@@ -222,7 +227,7 @@ if ($downEvent -and $stoppedAt) {
     Write-Host "  DOWN observado: no (ventana demasiado corta)"
 }
 if ($upEvent -and $stoppedAt) {
-    Write-Host ("  UP observado tras restaurar: {0:N2} s" -f ($upAt - $stoppedAt).TotalSeconds)
+    Write-Host ("  UP observado tras restaurar: {0:N2} s" -f ($upAt - $restoredAt).TotalSeconds)
 } else {
     Write-Host "  UP observado tras restaurar: no"
 }
