@@ -119,11 +119,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\PoCs\Invoke-LoadTest.ps1 `
   -BaseUrl "http://<IP_HOST>" -Requests 500 -Concurrency 20
 ```
 
-Opcionalmente, compara más niveles de concurrencia dentro de los límites
-acordados para el host. No hace falta instalar `ab`. Guarda la salida completa
-en `PoCs/evidencias/poc1-carga-<fecha>.txt` y registra solicitudes,
-concurrencia, errores, códigos HTTP, req/s y percentiles para comparar caché
-fría y caliente.
+
 
 ## PoC 2: failover por capas
 
@@ -166,10 +162,7 @@ Para probar una sola capa:
 
 Para revisar sin tocar nada: añade `-WhatIf`.
 
-Guarda la salida del monitor en
-`PoCs/evidencias/poc2-failover-cliente-<fecha>.txt` y el resumen del host en
-`PoCs/evidencias/poc2-failover-host-<fecha>.txt`. Registra la traza antes y
-después, el tiempo de detección y recuperación, solicitudes exitosas y errores.
+
 
 ## PoC 3: ingeniería del caos
 
@@ -194,11 +187,7 @@ El script elige `app1`, `app2` o `app3` al azar, lo detiene y **siempre** lo
 restaura en un bloque `finally`. Después espera a que HAProxy lo marque `UP`.
 Para fijar el nodo: `-Target app2`. Para revisar sin cambios: `-WhatIf`.
 
-Guarda la salida del monitor y la del host en
-`PoCs/evidencias/poc3-chaos-cliente-<fecha>.txt` y
-`PoCs/evidencias/poc3-chaos-host-<fecha>.txt`. Registra el nodo afectado, la
-duración de la falla, sondeos correctos, errores, disponibilidad y retorno a
-la rotación.
+
 
 ## Pruebas complementarias del plan y del laboratorio
 
