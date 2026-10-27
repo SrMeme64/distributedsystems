@@ -257,18 +257,6 @@ contenedores quedan `Exited (0)` y los datos permanecen en sus volúmenes.
 En la raíz del repositorio están además `Start-Stack.ps1`, `Stop-Stack.ps1` e
 `Install-AutoStart.ps1`.
 
-## Evidencias
-
-Guarda tus capturas en `PoCs/evidencias/`. Esa carpeta está excluida de Git
-salvo su propio `README.md`, así que puedes pegar texto, CSV o capturas sin
-ensuciar el repositorio. La convención de nombres está en
-[`evidencias/README.md`](evidencias/README.md).
-
-La captura versionada del dashboard está en
-[`resilience-lab/panel-laboratorio.png`](../resilience-lab/panel-laboratorio.png).
-Los resultados y métricas de las ejecuciones LAN están resumidos en este
-documento y el informe general.
-
 ## Si Windows bloquea los scripts
 
 Ejecuta cada comando con `powershell -NoProfile -ExecutionPolicy Bypass -File`
