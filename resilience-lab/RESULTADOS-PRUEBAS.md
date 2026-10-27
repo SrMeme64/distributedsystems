@@ -1,6 +1,6 @@
 # Resultados de pruebas del sistema distribuido
 
-**Fecha:** 26–27 de octubre de 2026  
+**Fecha:** 26 de octubre de 2026  
 **Alcance:** puntos 1–5 de [TEST-PLAN.md](./TEST-PLAN.md).  
 **Entorno:** Docker Compose en Windows; tráfico dirigido al stack local.
 
