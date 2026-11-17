@@ -1,3 +1,11 @@
+import { randomUUID } from "node:crypto";
+import {
+  recordCatalogCacheRequest,
+  shutdownTelemetry,
+  withRedisSpan,
+} from "./instrumentation.js";
+import { closeReviewPublisher, publishReview } from "./review-publisher.js";
+import { isValidReviewIdempotencyKey } from "./review-message.js";
 import { createServer } from "node:http";
 import { MongoClient } from "mongodb";
 import mysql from "mysql2/promise";
@@ -114,11 +122,20 @@ const withRedisTimeout = (client) => ({
   get isReady() {
     return client.isReady;
   },
-  get: (key) => withTimeout(client.get(key), redisCommandTimeout, "Redis GET"),
-  set: (...args) => withTimeout(client.set(...args), redisCommandTimeout, "Redis SET"),
-  eval: (...args) => withTimeout(client.eval(...args), redisCommandTimeout, "Redis EVAL"),
-  del: (...args) => withTimeout(client.del(...args), redisCommandTimeout, "Redis DEL"),
-  ping: () => withTimeout(client.ping(), redisCommandTimeout, "Redis PING"),
+  get: (key) =>
+    withRedisSpan("GET", () => withTimeout(client.get(key), redisCommandTimeout, "Redis GET")),
+  set: (...args) =>
+    withRedisSpan("SET", () =>
+      withTimeout(client.set(...args), redisCommandTimeout, "Redis SET"),
+    ),
+  eval: (...args) =>
+    withRedisSpan("EVAL", () =>
+      withTimeout(client.eval(...args), redisCommandTimeout, "Redis EVAL"),
+    ),
+  del: (...args) =>
+    withRedisSpan("DEL", () => withTimeout(client.del(...args), redisCommandTimeout, "Redis DEL")),
+  ping: () =>
+    withRedisSpan("PING", () => withTimeout(client.ping(), redisCommandTimeout, "Redis PING")),
 });
 
 class HttpError extends Error {
@@ -188,6 +205,25 @@ const start = async () => {
     void (async () => {
       const pathname = new URL(request.url, "http://localhost").pathname;
 
+      if (request.method === "GET" && pathname === "/healthz") {
+        sendJson(response, 200, { status: "ok" }, trace);
+        return;
+      }
+
+      if (request.method === "GET" && pathname === "/readyz") {
+        const [database] = await Promise.allSettled([
+          withTimeout(pool.query("SELECT 1"), 2_000, "MariaDB readiness check"),
+        ]);
+        const ready = database.status === "fulfilled";
+        sendJson(
+          response,
+          ready ? 200 : 503,
+          { status: ready ? "ok" : "unavailable" },
+          [...trace, ready ? "mariadb" : "mariadb (unavailable)"],
+        );
+        return;
+      }
+
       if (request.method === "GET" && pathname === "/health") {
         const redis = activeRedis();
         const checks = await Promise.allSettled([
@@ -242,6 +278,7 @@ const start = async () => {
 
         const redis = activeRedis();
         if (!redis) {
+          recordCatalogCacheRequest("unavailable");
           trace.push("mariadb", "redis (unavailable)");
           const products = await loadCatalog();
           sendJson(response, 200, products, trace);
@@ -250,22 +287,32 @@ const start = async () => {
 
         let cacheFailed = false;
         trace.push("redis");
-        const { value: products, cacheHit, cacheAvailable } = await getCatalog({
-          redis,
-          cacheKey: productsCacheKey,
-          ttlSeconds: cacheTtlSeconds,
-          load: async () => {
-            trace[trace.length - 1] = cacheFailed
-              ? "redis (unavailable)"
-              : "redis (cache miss)";
-            trace.push("mariadb");
-            return loadCatalog();
-          },
-          onCacheError: (error) => {
-            cacheFailed = true;
-            console.error("Catalog cache unavailable; serving from MariaDB:", error.message);
-          },
-        });
+        let catalog;
+        try {
+          catalog = await getCatalog({
+            redis,
+            cacheKey: productsCacheKey,
+            ttlSeconds: cacheTtlSeconds,
+            load: async () => {
+              trace[trace.length - 1] = cacheFailed
+                ? "redis (unavailable)"
+                : "redis (cache miss)";
+              trace.push("mariadb");
+              return loadCatalog();
+            },
+            onCacheError: (error) => {
+              cacheFailed = true;
+              console.error("Catalog cache unavailable; serving from MariaDB:", error.message);
+            },
+          });
+        } catch (error) {
+          recordCatalogCacheRequest("error");
+          throw error;
+        }
+        const { value: products, cacheHit, cacheAvailable } = catalog;
+        recordCatalogCacheRequest(
+          cacheHit ? "hit" : cacheAvailable ? "miss" : "unavailable",
+        );
 
         if (cacheHit) {
           trace.push("cache hit");
@@ -336,6 +383,10 @@ const start = async () => {
         ) {
           throw new HttpError(400, "Provide reviewer, rating (1-5), and comment within the allowed lengths");
         }
+        const requestKey = request.headers["idempotency-key"];
+        if (requestKey !== undefined && !isValidReviewIdempotencyKey(requestKey)) {
+          throw new HttpError(400, "Idempotency-Key must contain 1-128 safe characters");
+        }
         trace.push("mariadb (product lookup)");
         const [matches] = await pool.execute("SELECT 1 FROM products WHERE sku = ? LIMIT 1", [
           reviewMatch[1],
@@ -350,11 +401,28 @@ const start = async () => {
           comment,
           createdAt: new Date(),
         };
+        const idempotencyKey = requestKey || randomUUID();
+        if (process.env.RABBITMQ_URL) {
+          try {
+            await publishReview(review, idempotencyKey);
+          } catch (error) {
+            console.error("Review queue publish failed:", error.message);
+            throw new HttpError(503, "Review queue is temporarily unavailable", trace);
+          }
+          sendJson(
+            response,
+            202,
+            { status: "accepted", idempotencyKey },
+            [...trace, "rabbitmq (reviews.created)"],
+          );
+          return;
+        }
+
         const client = await getMongo();
         const result = await client
           .db(mongoDatabase)
           .collection("product_reviews")
-          .insertOne(review);
+          .insertOne({ sampleId: idempotencyKey, ...review });
         sendJson(response, 201, { id: result.insertedId.toString(), ...review }, [...trace, "mongodb (insert review)"]);
         return;
       }
@@ -388,7 +456,16 @@ const start = async () => {
         pool.end(),
         mongo.close(),
         redisConnection ? redisConnection.close() : Promise.resolve(),
-      ]).then(() => process.exit(0));
+        closeReviewPublisher(),
+        shutdownTelemetry(),
+      ]).then((results) => {
+        for (const result of results) {
+          if (result.status === "rejected") {
+            console.error("Shutdown cleanup failed:", result.reason);
+          }
+        }
+        process.exit(0);
+      });
     });
   };
   process.on("SIGINT", shutdown);

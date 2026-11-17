@@ -18,12 +18,74 @@ mantienen en los documentos enlazados.
 |---|---|
 | [Plan de pruebas](resilience-lab/TEST-PLAN.md) | Casos funcionales, rendimiento, disponibilidad, caos y observabilidad; herramientas y criterios esperados. |
 | [Resultados de pruebas](resilience-lab/RESULTADOS-PRUEBAS.md) | Mediciones realizadas, estado de cada área, límites de alcance y evidencia visual. |
+| [Resultados de rendimiento en Kubernetes local](deploy/RESULTADOS-RENDIMIENTO-LOCAL.md) | Latencias de catálogo con caché fría/caliente en el perfil Minikube de un nodo. |
 | [Guía del laboratorio](resilience-lab/README.md) | Inicio del dashboard, uso de ApacheBench, Siege, JMeter y Chaos Monkey. |
 | [Guía de las tres PoC LAN](PoCs/README.md) | Pasos para ejecutar carga, failover por capas y caos con un host y un cliente. |
+| [Despliegue local en Kubernetes](deploy/README.md) | Minikube, Kustomize y límites del entorno de desarrollo local. |
 
-## Arquitectura
+## Alcance implementado y límites
 
-El stack se ejecuta con Docker Compose en un host. Los pares HAProxy y
+Hay dos recorridos locales distintos: el stack original Docker Compose y una
+implementación de migración que se ejecuta en Minikube. Para no competir por
+memoria, se detiene Compose antes de iniciar Kubernetes; ambos conservan sus
+propios datos. El estado verificado de Kubernetes está en el perfil
+`distributed-local-one-node`, no en el perfil antiguo de tres nodos.
+
+| Fase del plan | Qué sí está implementado localmente | Qué no demuestra o sigue pendiente |
+|---|---|---|
+| 0. Aplicación e imágenes | Imágenes locales de web/API, healthchecks y configuración por entorno. | Publicación versionada en GHCR y flujo de releases. |
+| 1. Infraestructura | Minikube de un nodo con la aplicación operativa; hay configuración Terraform para K3s/libvirt. | Terraform no se aplicó en VMs; no hay K3s/etcd HA, kube-vip verificado ni backend remoto. Un nodo no es un clúster tolerante a fallas. |
+| 2. Kubernetes | Kustomize despliega web/API, MariaDB, MongoDB, Redis y RabbitMQ; sondas, PVC, worker y telemetría funcionan. | Operadores y bases en HA, Ingress productivo, NetworkPolicies probadas y overlays de producción. |
+| 3. Colas | RabbitMQ local, reseñas asíncronas, idempotencia, reintentos y DLQ probados con smoke. | RabbitMQ de tres réplicas/quorum, alertas y escalado por profundidad de cola. |
+| 4. CI/CD | GitHub Actions ejecuta pruebas, auditorías, builds y validaciones de manifiestos/Terraform. | Publicación en GHCR, firma/SBOM, escaneo de imágenes y despliegue protegido. Que exista el workflow no significa que se hayan desplegado releases. |
+| 5. GitOps | Hay código de infraestructura y manifiestos de apoyo para el futuro bootstrap. | Flux no está instalado ni reconciliando este perfil local; no hay promoción entre entornos ni secretos SOPS. |
+| 6. Observabilidad | Collector OTel, Grafana/Tempo/Prometheus local, dashboard y trazas de API, datos, Redis, RabbitMQ y worker. | LGTM de producción, alertas completas, SLO, telemetría de clúster y spans propios de Nginx. El backend usa Prometheus en vez de Mimir y consume recursos del host. |
+| 7. Seguridad | El namespace usa PSA `baseline` y audita/advierte sobre `restricted`; web/API/worker/Collector usan controles de usuario no root y filesystem de solo lectura donde está configurado. Los secretos locales se generan aparte, se ignoran en Git y usan permisos privados. | Wazuh no está instalado. No se fuerza `restricted` globalmente: los manifiestos actuales de MariaDB/MongoDB aún no definen el contexto restringido requerido y el init container de RabbitMQ usa `CHOWN` para el PVC. Hay que adaptar y probar esos Pods antes de hacer cumplir la política. Tampoco hay RBAC mínimo completo, NetworkPolicies verificadas, TLS de Ingress/mTLS, autenticación/límite de tasa de API ni escaneo de imágenes Trivy. |
+| 8. Validación | Smoke de extremo a extremo, medición fría/caliente y respaldo/restauración aislada de MariaDB, MongoDB y definiciones RabbitMQ. | No hay migración de datos Compose, pruebas de caos/SLO en Kubernetes ni respaldo de mensajes en tránsito de RabbitMQ. |
+
+### Wazuh: posibilidad y límite real
+
+Wazuh **sí se puede probar localmente**, pero todavía no forma parte del
+despliegue. Una demo de un nodo puede instalar manager, indexer y dashboard,
+y un agente para ese nodo; eso sirve para aprender y demostrar ingesta/FIM,
+no para probar alta disponibilidad ni cobertura de una flota. El indexer y la
+telemetría comparten CPU, RAM y disco con Minikube, la tienda y LGTM; por eso
+primero hay que medir el consumo libre y decidir si se reduce o se apaga LGTM
+durante la prueba. El agente de un nodo Minikube bajo Docker tampoco equivale
+automáticamente a un agente Wazuh instalado en el host Linux: la visibilidad
+de archivos del host y los logs de auditoría K3s requieren accesos y una
+configuración adicionales. Se dejó pendiente deliberadamente para no presentar
+como hecha una integración que no se ha desplegado ni validado.
+
+Los manifiestos de Wazuh, si se agregan, deben ser un overlay opcional y no
+parte obligatoria del arranque local; no se debe habilitar acceso privilegiado
+al host sin revisar exactamente qué rutas se montan.
+
+### Qué conservar y qué no subir
+
+- `database/catalog.sql` y `deploy/base/catalog.sql` son copias coordinadas:
+  CI verifica que coincidan. No se borra una de ellas sin cambiar también la
+  inicialización y esa verificación.
+- `web/site1`, `site2` y `site3`, HAProxy/Keepalived, Galera/ProxySQL, Nagios,
+  `PoCs/` y `resilience-lab/` pertenecen al stack Compose o a sus pruebas y
+  guías. No son recursos del overlay Minikube, pero tampoco son basura mientras
+  se conserve el proyecto original y su evidencia.
+- Se retiró `.DS_Store`, metadata de Finder que no es fuente del proyecto; Git
+  ahora la ignora.
+- Las carpetas `.terraform/` son descargas/cachés regenerables y están
+  ignoradas. El estado `terraform.tfstate` contiene datos sensibles de
+  infraestructura y también está ignorado: se conserva localmente, no se
+  borra ni se versiona sin revisar su uso.
+- `.env.exam` es el archivo de entorno de demostración que usan Compose y la
+  creación de Secrets locales. Trátalo solo como configuración de laboratorio:
+  `.env.exam` está versionado y Git seguirá registrando sus cambios aunque el
+  patrón `.env.*` figure en `.gitignore`; nunca pongas credenciales reales en
+  ese archivo ni lo uses fuera del laboratorio.
+- Los respaldos locales contienen datos y permanecen fuera del repositorio.
+
+## Arquitectura original en Docker Compose
+
+El diseño original usa Docker Compose en un host. Los pares HAProxy y
 Keepalived administran las VIP de presentación y aplicación. La capa de datos
 combina MariaDB Galera y ProxySQL para el catálogo, MongoDB Replica Set para
 reseñas y Redis Sentinel para la caché descartable.
@@ -89,6 +151,11 @@ elimina el punto único de falla del host, Docker Desktop ni del proxy de
 entrada. El detalle de la configuración de datos está en
 [docker-compose.yml](docker-compose.yml) y en sus directorios de servicio.
 
+La migración gradual a Kubernetes se desarrolla en
+[PLATFORM-MIGRATION-PLAN.md](PLATFORM-MIGRATION-PLAN.md). Compose sigue siendo
+el entorno local existente; la primera superposición Minikube está documentada
+en [deploy/README.md](deploy/README.md).
+
 ## Estructura del repositorio
 
 | Ruta | Propósito |
@@ -100,6 +167,7 @@ entrada. El detalle de la configuración de datos está en
 | `nagios/` | Definiciones de hosts, servicios y alertas locales. |
 | `PoCs/` | Tres pruebas guiadas LAN y scripts de readiness, carga, failover y monitoreo. |
 | `resilience-lab/` | ApacheBench, Siege, JMeter, Chaos Monkey, dashboard y volumen de resultados. |
+| `deploy/` | Base Kustomize, overlay de Minikube local y scripts de construcción y smoke tests. |
 | `Start-Stack.ps1`, `Stop-Stack.ps1` | Arranque y apagado ordenado del stack. |
 | `Install-AutoStart.ps1` | Instalación o retirada del arranque automático al iniciar sesión. |
 
@@ -221,12 +289,14 @@ sin revisar primero la posición de recuperación y respaldar los datos.
 
 ## Resultados y evidencia
 
-La última validación documentada incluye **9/9 comprobaciones de readiness**,
-**29/29 servicios principales activos**, **11/11 pruebas unitarias aprobadas**,
-configuraciones Compose válidas y preflight de Nagios sin advertencias ni
-errores. El informe enlazado especifica métricas, resultados por escenario,
-límites y capturas. Los números corresponden a una ejecución local y no son
-garantías de capacidad ni objetivos SLO.
+El informe de Compose del **26 de octubre de 2026** registra 9/9 comprobaciones
+de readiness y 29/29 servicios activos para esa ejecución; no describe el
+estado actual de Kubernetes. Para la migración local, Minikube quedó verificado
+el **16 de noviembre de 2026**: 11/11 Pods listos, smoke funcional y de
+telemetría aprobada, 14/14 pruebas unitarias de API y una medición de
+rendimiento descrita en
+[los resultados locales](deploy/RESULTADOS-RENDIMIENTO-LOCAL.md). Ninguna de
+estas cifras es una garantía de capacidad ni un objetivo SLO.
 
 ---
 

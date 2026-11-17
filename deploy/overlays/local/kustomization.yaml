@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: store
+
+resources:
+  - ../../base
+  - otel-collector.yaml
+  - rabbitmq.yaml
+  - worker.yaml
+
+secretGenerator:
+  - name: api-secrets
+    envs:
+      - secrets/api.secret
+  - name: mariadb-secrets
+    envs:
+      - secrets/mariadb.secret
+  - name: mongodb-secrets
+    envs:
+      - secrets/mongodb.secret
+  - name: rabbitmq-secrets
+    envs:
+      - secrets/rabbitmq.secret
+
+images:
+  - name: store-catalog-api
+    newName: store-catalog-api
+    newTag: dev
+  - name: store-web
+    newName: store-web
+    newTag: dev
+
+patches:
+  - path: web-nodeport.yaml
+  - path: api-otel.yaml
+  - path: api-rabbitmq.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: distributed-store
+    includeSelectors: true

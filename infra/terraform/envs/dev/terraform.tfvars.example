@@ -1,0 +1,9 @@
+cluster_name        = "distributed-dev"
+libvirt_uri         = "qemu:///system"
+libvirt_pool_path   = "/var/lib/libvirt/images/distributed-dev"
+network_cidr        = "192.168.250.0/24"
+node_ips            = ["192.168.250.11", "192.168.250.12", "192.168.250.13"]
+api_vip             = "192.168.250.10"
+k3s_version         = "v1.37.2+k3s1"
+node_memory_mib     = 2048
+node_vcpu           = 2

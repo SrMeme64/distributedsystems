@@ -26,6 +26,18 @@ backups/
 # Python bytecode from local test runs.
 __pycache__/
 *.pyc
+.DS_Store
+
+# Local Terraform state, plans, credentials, and provider downloads.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+**/backend.hcl
+crash.log
+crash.*.log
 
 # Capturas locales de las PoC: cada operador guarda sus resultados aqui.
 PoCs/evidencias/*

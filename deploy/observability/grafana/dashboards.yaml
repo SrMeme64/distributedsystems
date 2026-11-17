@@ -1,0 +1,12 @@
+apiVersion: 1
+providers:
+  - name: Distributed Store
+    folder: Distributed Store
+    folderUid: distributed-store
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/custom
+      foldersFromFilesStructure: false

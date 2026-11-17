@@ -1,189 +1,305 @@
-# Platform Migration Plan: Kubernetes, Queues, IaC, CI/CD, Observability, Security
+# Plan de migración de plataforma: Kubernetes, colas, IaC, CI/CD, observabilidad y seguridad
 
-This plan complements [ToDo.md](./ToDo.md). It describes how to move the
-Compose-based stack (see [README.md](./README.md)) to Kubernetes with the
-technologies below. Docker Compose stays as the local development environment.
+Este plan complementa [ToDo.md](./ToDo.md). Describe la migración del stack
+basado en Compose (consulta [README.md](./README.md)) a Kubernetes con las
+tecnologías que se detallan a continuación. Docker Compose se conserva como
+entorno local de desarrollo.
 
-## Technology decisions
+## Estado de la implementación local
 
-| Area | Choice | Rationale |
-|------|--------|-----------|
-| Cluster | **K3s** (3 nodes; Minikube only for single-developer smoke tests) | Multi-node, lightweight, real HA semantics (embedded etcd) |
-| IaC | **Terraform** (with OpenTofu compatibility) | Mature providers for K3s hosts, Helm, Kubernetes, and cloud/VM resources |
-| GitOps | **FluxCD** | Pull-based reconciliation of cluster state from Git |
-| CI/CD | **GitHub Actions** | Repository is already on GitHub; no extra server to run |
-| Queues | **RabbitMQ** (Cluster Operator) | Durable queues, retries, dead-lettering; NATS JetStream is the alternative |
-| Observability | **OpenTelemetry + Grafana LGTM** (Loki, Grafana, Tempo, Mimir) | Unified logs, metrics, traces; Nagios kept for external black-box checks |
-| Security | **Wazuh** (+ Kubernetes-native controls) | Host/container IDS, FIM, vulnerability detection, compliance |
+La implementación funcional local usa un nodo Minikube en este equipo Linux;
+sirve para desarrollo y pruebas, no para alta disponibilidad. Todos los
+servicios y datos dependen de este host. El stack Compose y sus volúmenes de
+datos se conservan por separado y se detienen (no se eliminan) mientras se
+ejecuta Minikube para evitar competir por memoria. El overlay local
+ejecuta la web y la API, MariaDB y MongoDB de un solo nodo, RabbitMQ, el worker
+de reseñas y Redis descartable, con PVC para las bases de datos y la cola. La
+suite smoke de extremo a extremo cubre lecturas frías y calientes del catálogo,
+además de escrituras de reseñas asíncronas e idempotentes. Las trazas y métricas
+de la API y del navegador pasan por un Collector local de OpenTelemetry hacia
+un stack LGTM de desarrollo con recursos limitados. Nginx propaga el contexto
+W3C, pero no genera spans propios con la imagen actual.
 
-## Target architecture
+Esto no es una migración a producción: los datos de Compose no se migraron y
+Terraform aplicado, Flux, RabbitMQ/base de datos en alta disponibilidad y LGTM
+de producción siguen pendientes. Wazuh es técnicamente posible como demo local,
+pero todavía no se instaló: se aplaza hasta medir recursos y configurar de
+forma segura el acceso a logs del nodo. Consulta los límites y los componentes
+prescindibles del repositorio en [README.md](./README.md) y los comandos en
+[deploy/README.md](./deploy/README.md).
+
+## Decisiones tecnológicas
+
+| Área | Elección | Motivo |
+|---|---|---|
+| Clúster | **K3s** (3 nodos; Minikube solo para smoke tests de un desarrollador) | Ligero, multinodo y con semántica real de alta disponibilidad (etcd integrado). |
+| IaC | **Terraform** (compatible con OpenTofu) | Proveedores consolidados para hosts K3s, Helm, Kubernetes y recursos cloud/VM. |
+| GitOps | **FluxCD** | Reconcilia de forma pull el estado del clúster desde Git. |
+| CI/CD | **GitHub Actions** | El repositorio ya está en GitHub; no requiere otro servidor. |
+| Colas | **RabbitMQ** (Cluster Operator) | Colas durables, reintentos y mensajes de descarte; NATS JetStream es la alternativa. |
+| Observabilidad | **OpenTelemetry + Grafana LGTM** (Loki, Grafana, Tempo y Mimir) | Unifica logs, métricas y trazas; Nagios se conserva para comprobaciones externas de caja negra. |
+| Seguridad | **Wazuh** y controles nativos de Kubernetes | IDS de host/contenedor, FIM, detección de vulnerabilidades y cumplimiento. |
+
+## Arquitectura objetivo
 
 ```mermaid
 flowchart LR
-    gh[GitHub repo] -->|push / PR| gha[GitHub Actions<br/>build, test, scan, push image]
-    gha --> reg[(Container registry)]
-    gha -->|updates image tag in Git| gitops[GitOps manifests]
-    tf[Terraform] -->|provisions nodes, K3s, Flux bootstrap| k3s
-    flux[FluxCD] -->|reconciles| k3s
+    gh[Repositorio GitHub] -->|push / PR| gha[GitHub Actions<br/>compilar, probar, escanear y publicar imagen]
+    gha --> reg[(Registro de contenedores)]
+    gha -->|actualiza etiqueta de imagen en Git| gitops[Manifiestos GitOps]
+    tf[Terraform] -->|aprovisiona nodos, K3s e inicio de Flux| k3s
+    flux[FluxCD] -->|reconcilia| k3s
     gitops --> flux
 
-    subgraph k3s["K3s cluster (3+ nodes)"]
-        ing[Ingress + TLS] --> web[Nginx Deployment]
-        ing --> api[API Deployment]
+    subgraph k3s["Clúster K3s (3+ nodos)"]
+        ing[Ingress + TLS] --> web[Deployment Nginx]
+        ing --> api[Deployment API]
         api --> redis[(Redis HA)]
         api --> galera[(MariaDB Galera + proxy)]
-        api -->|publish| mq[[RabbitMQ]]
-        mq --> worker[Worker Deployment]
+        api -->|publica| mq[[RabbitMQ]]
+        mq --> worker[Deployment worker]
         worker --> mongo[(MongoDB replica set)]
         worker --> redis
-        web & api & worker -->|OTLP| otel[OTel Collector]
+        web & api & worker -->|OTLP| otel[Collector OTel]
         otel --> lgtm[Loki / Tempo / Mimir / Grafana]
         wazuhagent[Wazuh agents DaemonSet] --> wazuh[Wazuh manager + indexer + dashboard]
     end
-    nagios[Nagios external checks] --> ing
+    nagios[Comprobaciones externas Nagios] --> ing
 ```
 
-## Queue use cases
+## Casos de uso de colas
 
-1. **Asynchronous review writes**: `POST` review → API validates and publishes to
-   `reviews.created`; a worker persists to MongoDB. Add idempotency keys,
-   retries with backoff, and a dead-letter queue (`reviews.dlq`).
-2. **Cache invalidation**: catalog changes publish `catalog.changed`; workers
-   (or API pods via fan-out exchange) delete scoped Redis keys.
-3. **Cache warm-up / stampede protection**: a single worker consumes
-   `catalog.refresh` and repopulates the cache, so cache misses do not all hit
-   MariaDB (addresses ToDo item 4).
+1. **Escritura asíncrona de reseñas:** `POST` de reseña → la API valida y
+   publica en `reviews.created`; un worker guarda en MongoDB. Se requieren
+   claves de idempotencia, reintentos con espera incremental y una cola DLQ
+   (`reviews.dlq`).
+2. **Invalidación de caché:** los cambios del catálogo publican
+   `catalog.changed`; los workers (o los Pods de la API mediante un exchange
+   fan-out) eliminan claves acotadas de Redis.
+3. **Calentamiento de caché y protección contra estampidas:** un solo worker
+   consume `catalog.refresh` y vuelve a llenar la caché, de modo que los
+   fallos de caché no consulten todos MariaDB (atiende el punto 4 de ToDo).
 
-## Phases
+## Fases
 
-### Phase 0 – Prerequisites
-- [ ] Containerize with versioned, non-root, minimal images for `web` and
-  `application`; add `/healthz` and `/readyz` endpoints to the API.
-- [ ] Make the API configuration 12-factor (env vars only, no hardcoded hosts).
-- [ ] Decide registry (GHCR) and image tagging (`sha-<commit>` + semver).
+### Fase 0 – Requisitos previos
 
-### Phase 1 – IaC with Terraform
-- [ ] Create `infra/terraform/` with modules: `network`, `k3s-nodes`,
-  `flux-bootstrap`, `storage`.
-- [ ] Provision 3 server nodes (VMs or local multipass/libvirt) and install K3s
-  with embedded etcd HA.
-- [ ] Remote state with locking; separate workspaces/tfvars for `dev` and
-  `prod`.
-- [ ] Bootstrap FluxCD via the Terraform `flux` provider.
-- [ ] Run `terraform fmt`, `validate`, `tflint`, and `checkov` in CI.
-- Local alternative: `minikube start --nodes 3` for developer testing.
+- [x] Añadir imágenes versionadas y sin privilegios para `web` y
+  `application`, junto con endpoints API `/healthz` y `/readyz`. El overlay
+  local aplica ejecución sin privilegios y sistema de archivos de solo lectura
+  a esas cargas.
+- [x] Mantener las direcciones de dependencias de la API en variables de
+  entorno; el overlay de Kubernetes local proporciona sus valores en la
+  configuración de las cargas.
+- [ ] Elegir registro de imágenes (GHCR) y esquema de etiquetas
+  (`sha-<commit>` + semver).
 
-### Phase 2 – Kubernetes workloads
-- [ ] Add `deploy/` (Kustomize base + `dev`/`prod` overlays) or Helm charts for:
-  web, API, worker, ConfigMaps, Services, Ingress.
-- [ ] Replace HAProxy + Keepalived with Service/Ingress (Traefik ships with K3s)
-  and MetalLB for a VIP on bare metal.
-- [ ] Set resource requests/limits, liveness/readiness probes, HPAs,
-  PodDisruptionBudgets, and topology spread constraints.
-- [ ] Deploy data tier via operators: MariaDB Operator (Galera) with
-  MaxScale/ProxySQL, MongoDB Community Operator (replica set), Redis
-  Sentinel/operator, RabbitMQ Cluster Operator.
-- [ ] Add NetworkPolicies (default-deny, explicit allows per tier).
+### Fase 1 – IaC con Terraform
 
-### Phase 3 – Queues
-- [ ] Deploy RabbitMQ (3 replicas, quorum queues, persistent volumes).
-- [ ] Add a `worker/` service; add publisher code to
-  [index.js](./application/index.js).
-- [ ] Define exchanges, queues, DLQs, and message schemas in version control.
-- [ ] Add queue depth, consumer lag, and DLQ alerts.
-- [ ] Autoscale workers on queue depth (KEDA, optional).
+- [x] Crear y validar `infra/terraform/` con los módulos `network`,
+  `k3s-nodes`, `flux-bootstrap` y `storage`.
+- [ ] Aprovisionar tres nodos servidor y verificar K3s con etcd integrado en
+  HA y kube-vip para el endpoint del API.
+- [x] Mantener estados locales separados para `dev` y `dev-flux` en este equipo;
+  excluirlos de Git y protegerlos con permisos de usuario.
+- [ ] Elegir un backend remoto con cifrado, versionado y bloqueo antes de
+  compartir el estado o definir producción.
+- [ ] Iniciar FluxCD mediante el proveedor Terraform de Flux en el clúster
+  creado.
+- [ ] Ejecutar y hacer pasar `terraform fmt`, `validate`, `tflint` y Checkov
+  en CI.
+- [x] Alternativa local funcional: perfil Minikube de un nodo para desplegar y
+  probar toda la aplicación en este equipo; no proporciona HA.
 
-### Phase 4 – CI/CD with GitHub Actions
-- [ ] `ci.yml` on PRs: lint, unit tests, build images, Trivy image scan,
-  `terraform validate`, `kubeconform` on manifests.
-- [ ] `release.yml` on `main`: build and push images to GHCR, sign with cosign,
-  generate SBOM, then commit the new image tag to the GitOps path (or let Flux
-  image automation do it).
-- [ ] Use OIDC to cloud/registry; no long-lived credentials in repo secrets
-  where avoidable.
-- [ ] `terraform plan` comment on PRs; `apply` only from protected `main` with
-  manual approval.
-- [ ] Optional Jenkins alternative is out of scope unless a self-hosted
-  requirement appears.
+> **Decisiones tomadas:** para desarrollo se eligió KVM/libvirt local,
+> Terraform CLI ejecutado en este equipo y estado local independiente para
+> `dev`/`dev-flux`. La configuración está en
+> [infra/terraform](./infra/terraform). Aún faltan libvirt en el host, acceso
+> del usuario a `/dev/kvm` y la revisión de un plan real. Producción no está
+> definida. No se debe ejecutar `apply` ni marcar la fase completa hasta
+> resolver esos requisitos y validar el plan.
+> El bootstrap inicial de K3s usa `192.168.250.11`; Flux instala kube-vip
+> después y habilita la VIP `192.168.250.10`. La implementación local está
+> preparada, pero todavía no se ha aplicado ni verificado sobre VMs.
 
-### Phase 5 – GitOps with FluxCD
-Use cases to implement:
-- [ ] **Cluster bootstrap**: `clusters/<env>/` holds Flux `GitRepository` and
-  `Kustomization` objects; Terraform only bootstraps Flux itself.
-- [ ] **Environment promotion**: `dev` tracks `main`; `prod` tracks tags or a
-  `release` branch, with PR approval as the promotion gate.
-- [ ] **Image automation**: `ImageRepository`, `ImagePolicy`,
-  `ImageUpdateAutomation` to update tags in Git.
-- [ ] **Dependency ordering**: `dependsOn` chain — operators → data tier →
-  queues → apps → observability configs.
-- [ ] **Drift correction & rollback**: manual `kubectl` changes are reverted;
-  rollback is `git revert`.
-- [ ] **Secrets**: SOPS (age) or External Secrets with Flux decryption.
-- [ ] **Notifications**: Flux `Provider`/`Alert` to Slack/GitHub commit status.
+### Fase 2 – Cargas de Kubernetes
 
-### Phase 6 – Observability (OpenTelemetry + LGTM)
-- [ ] Deploy `grafana/lgtm`-style stack via Helm (Loki, Tempo, Mimir, Grafana)
-  managed by Flux; Alloy or the OTel Collector as the gateway.
-- [ ] Instrument with OpenTelemetry:
-  - Node.js API: `@opentelemetry/sdk-node` auto-instrumentation (HTTP, Redis,
-    MySQL, MongoDB, AMQP) with context propagation through RabbitMQ message
-    headers.
-  - Nginx: `ngx_otel_module` to start/continue `traceparent`.
-  - Browser: `@opentelemetry/sdk-trace-web`, replacing the custom trace headers
-    and UI in [catalog.js](./web/catalog.js).
-- [ ] OTel Collector as DaemonSet (agent) + Deployment (gateway): OTLP in;
-  traces → Tempo, metrics → Mimir, logs → Loki. Add `k8sattributes` processor.
-- [ ] Dashboards: RED metrics per service, cache hit rate, Galera cluster
-  health, RabbitMQ depth, node/pod saturation. Alerts via Grafana/Alertmanager.
-- [ ] Define SLOs (e.g. p95 latency, availability) and burn-rate alerts.
-- [ ] Nagios: keep as an **external** black-box monitor (HTTP, TLS expiry,
-  Kubernetes API reachability) outside the cluster, porting checks from
-  [architecture.cfg](./nagios/architecture.cfg). Avoid duplicating in-cluster
-  metrics alerting.
+- [x] Añadir una base Kustomize y overlay local iniciales para web, API,
+  ConfigMaps, Services y servicios de datos independientes de desarrollo.
+- [x] Añadir un worker local para reseñas y RabbitMQ; faltan los overlays de
+  producción e Ingress.
+- [ ] Sustituir HAProxy + Keepalived por Service/Ingress (K3s incluye Traefik)
+  y MetalLB para una VIP en bare metal.
+- [x] Definir recursos locales, sondas API/web, PodDisruptionBudgets y
+  restricciones de distribución por topología.
+- [ ] Añadir HPA y políticas de PodDisruptionBudget/topología para producción.
+- [ ] Desplegar la capa de datos mediante operadores: MariaDB Operator
+  (Galera) con MaxScale/ProxySQL, MongoDB Community Operator (replica set),
+  Redis Sentinel/operator y RabbitMQ Cluster Operator.
+- [ ] Añadir NetworkPolicies (denegación por defecto y reglas explícitas por
+  capa).
 
-### Phase 7 – Security
-- [ ] Deploy Wazuh (manager, indexer, dashboard) via Helm/manifests in a
-  dedicated namespace; Wazuh agents as a DaemonSet on every node.
-- [ ] Enable FIM, vulnerability detection, rootcheck, Kubernetes/container and
-  audit-log ingestion; forward K3s audit logs to Wazuh.
-- [ ] Integrate Wazuh alerts with Grafana/Slack; tune rules and active
-  response conservatively.
-- [ ] Cluster hardening: Pod Security Admission `restricted`, non-root
-  containers, read-only root FS, RBAC least privilege, CIS benchmark via
-  kube-bench.
-- [ ] TLS via cert-manager at ingress; mTLS between services (optional mesh).
-- [ ] Least-privilege MongoDB/Redis/MariaDB users; secrets in SOPS/External
-  Secrets (resolves ToDo item 6).
-- [ ] API authentication and rate limiting at the ingress.
-- [ ] Supply chain: Trivy in CI, cosign signature verification (Kyverno
-  policy), Dependabot.
+### Fase 3 – Colas
 
-### Phase 8 – Cutover and validation
-- [ ] Run Compose and K3s in parallel; shift traffic gradually via DNS weights.
-- [ ] Port the [resilience-lab](./resilience-lab/README.md) scenarios to
-  Kubernetes (pod/node kill via Chaos Mesh or Litmus) and verify SLOs.
-- [ ] Test backup/restore for MariaDB, MongoDB, and RabbitMQ definitions.
-- [ ] Write runbooks: deploy, rollback, node loss, queue backlog, security
-  incident.
-- [ ] Decommission HAProxy/Keepalived containers from the production path.
+- [ ] Desplegar RabbitMQ productivo (3 réplicas, quorum queues y volúmenes
+  persistentes) con el Cluster Operator.
+- [x] Añadir el publisher local y el worker de reseñas en
+  [index.js](./application/index.js) y [worker.js](./application/worker.js);
+  el worker y overlay de producción siguen pendientes.
+- [x] Versionar exchanges, colas de reintentos y descarte, y el esquema de
+  mensajes locales en [review-queues.js](./application/review-queues.js) y
+  [review-message.js](./application/review-message.js).
+- [ ] Añadir alertas de profundidad de cola, retraso de consumo y DLQ.
+- [ ] Escalar workers según profundidad de cola (KEDA, opcional).
 
-## Proposed repository layout
+### Fase 4 – CI/CD con GitHub Actions
+
+- [x] Añadir un workflow para PR y push con pruebas API, auditoría de
+  dependencias API/web, construcción de imágenes y renderizado de Kustomize.
+- [ ] Añadir lint, escaneo de imágenes con Trivy, `terraform validate` y
+  `kubeconform`.
+- [ ] En `main`, `release.yml` debe construir y publicar imágenes en GHCR,
+  firmar con cosign, generar SBOM y actualizar la etiqueta en la ruta GitOps
+  (o permitir que la automatización de imágenes de Flux lo haga).
+- [ ] Usar OIDC para cloud/registro y evitar credenciales de larga duración en
+  los secretos del repositorio cuando sea posible.
+- [ ] Comentar `terraform plan` en PR; ejecutar `apply` solo desde `main`
+  protegido y con aprobación manual.
+- [ ] Jenkins queda fuera de alcance salvo que se requiera un servidor
+  autogestionado.
+
+### Fase 5 – GitOps con FluxCD
+
+Casos de uso por implementar:
+
+- [ ] **Inicio del clúster:** `clusters/<env>/` contiene los objetos Flux
+  `GitRepository` y `Kustomization`; Terraform solo inicia Flux.
+- [ ] **Promoción entre entornos:** `dev` sigue `main`; `prod` sigue etiquetas
+  o una rama `release`, con la aprobación de PR como control de promoción.
+- [ ] **Automatización de imágenes:** `ImageRepository`, `ImagePolicy` e
+  `ImageUpdateAutomation` actualizan las etiquetas en Git.
+- [ ] **Orden de dependencias:** cadena `dependsOn`: operadores → capa de
+  datos → colas → aplicaciones → configuración de observabilidad.
+- [ ] **Corrección de drift y reversión:** los cambios manuales con `kubectl`
+  se revierten; la reversión se hace con `git revert`.
+- [ ] **Secretos:** SOPS (age) o External Secrets con descifrado de Flux.
+- [ ] **Notificaciones:** Flux `Provider`/`Alert` para Slack o estado de
+  commit en GitHub.
+
+### Fase 6 – Observabilidad (OpenTelemetry + LGTM)
+
+- [x] Ejecutar un backend de desarrollo local `grafana/otel-lgtm` con
+  recursos limitados y volumen Docker persistente.
+- [x] Aprovisionar un dashboard local de API para tasa de solicitudes,
+  latencia p95 y tasa de aciertos de caché del catálogo.
+- [ ] Desplegar LGTM de producción con Helm y Flux: Loki, Tempo, Mimir, Grafana
+  y Alloy o el Collector OTel como gateway.
+- [x] Instrumentar spans/métricas HTTP de la API y exportarlos por OTLP a
+  través del Collector local hacia Tempo y Prometheus.
+- [ ] Completar instrumentación con OpenTelemetry:
+  - [x] API Node.js: HTTP, MySQL2 y MongoDB; se exportan los resultados de
+    caché como métrica.
+  - [x] Los spans de comandos Redis v5 no registran claves ni valores.
+  - [x] Spans AMQP de productor/consumidor con propagación W3C por los
+    encabezados de mensajes RabbitMQ.
+  - [x] Navegador: instrumentar solicitudes `fetch` con OpenTelemetry Web y
+    exportar spans por la ruta del Collector en el mismo origen.
+  - [x] Nginx: reenviar `traceparent`/`tracestate` a la API y proxy de
+    exportación OTLP. Los spans nativos de Nginx siguen pendientes porque no
+    hay un módulo compatible con la imagen Nginx Alpine mantenida y sin
+    privilegios.
+- [x] Añadir un Deployment Collector OTLP local con sondas, recursos limitados
+  y reenvío al backend LGTM local.
+- [ ] Collector OTel de producción como DaemonSet (agente) y Deployment
+  (gateway): recibe OTLP; envía trazas a Tempo, métricas a Mimir y logs a Loki;
+  añade el procesador `k8sattributes`.
+- [ ] Completar dashboards RED por servicio, tasa de aciertos de caché, salud
+  del clúster Galera, profundidad RabbitMQ y saturación de nodos/Pods. Añadir
+  alertas con Grafana/Alertmanager.
+- [ ] Definir SLO (p. ej., latencia p95 y disponibilidad) y alertas de
+  consumo de presupuesto de error.
+- [ ] Mantener Nagios como monitor externo de caja negra (HTTP, vencimiento de
+  TLS y conectividad de la API Kubernetes), fuera del clúster, migrando las
+  comprobaciones de [architecture.cfg](./nagios/architecture.cfg). Evitar
+  duplicar alertas de métricas internas.
+
+### Fase 7 – Seguridad
+
+- [ ] Desplegar Wazuh (manager, indexer y dashboard) con Helm/manifiestos en
+  un namespace dedicado; desplegar los agentes Wazuh como DaemonSet en cada
+  nodo. Es viable como demo de un nodo, pero aún no se instaló: se pospone
+  hasta medir RAM/CPU/disco junto a Minikube y LGTM. La demo no demostraría HA
+  ni cobertura de otros equipos; el acceso a logs de host/K3s necesita una
+  configuración adicional y debe revisarse antes de montar rutas sensibles.
+- [ ] Habilitar FIM, detección de vulnerabilidades, rootcheck, ingesta de
+  auditoría de Kubernetes/contenedores y envío de logs de auditoría K3s a
+  Wazuh. No está hecho porque Wazuh no está desplegado y el agente dentro de un
+  nodo Minikube Docker no observa por sí solo todos los logs del host Linux.
+- [ ] Integrar alertas Wazuh con Grafana/Slack; ajustar reglas y respuestas
+  activas con cautela.
+- [x] Aplicar controles base: namespace con Pod Security Admission `baseline`,
+  auditoría/advertencia `restricted`, y contenedores web/API/worker/Collector
+  no-root y con filesystem de solo lectura donde corresponde. Los recursos de
+  datos aún emiten advertencias `restricted`.
+- [ ] Aplicar Pod Security Admission `restricted` de forma obligatoria a todo
+  el namespace, completar RBAC mínimo y ejecutar el CIS benchmark con
+  kube-bench. No se fuerza `restricted` con los manifiestos actuales: MariaDB
+  y MongoDB aún no declaran los contextos necesarios y RabbitMQ prepara el PVC
+  local con un init container que usa `CHOWN`. Antes hay que adaptar y volver a
+  probar cada Pod, no ignorar las advertencias.
+- [ ] Añadir NetworkPolicies por capa y verificar su efecto con el CNI elegido.
+  No se consideran protección efectiva hasta probar que el CNI de Minikube/K3s
+  las aplica.
+- [ ] TLS en Ingress con cert-manager; mTLS entre servicios (malla opcional).
+- [ ] Usuarios de mínimo privilegio para MongoDB/Redis/MariaDB; secretos en
+  SOPS/External Secrets (atiende el punto 6 de ToDo). Los Secrets actuales
+  son archivos locales ignorados y privados, adecuados para desarrollo en este
+  host pero no cifrados en Git ni gestionados por Flux.
+- [ ] Autenticación de API y limitación de tasa en Ingress.
+- [ ] Cadena de suministro: Trivy en CI y verificación de firmas cosign con
+  política Kyverno; Dependabot.
+
+> **Límite de alcance:** la fase 7 no es imposible en local. Wazuh puede
+> desplegarse como laboratorio opcional de un nodo, pero manager/indexer/
+> dashboard compiten por recursos con la tienda y LGTM y no validarían HA ni
+> monitorización de varios equipos. Primero debe medirse el consumo disponible;
+> es razonable apagar LGTM durante esa demo o ejecutarla en otro entorno local
+> aislado. No se debe conceder acceso privilegiado al host o a logs de auditoría
+> hasta definir los montajes y permisos mínimos.
+
+### Fase 8 – Migración y validación
+
+- [ ] Ejecutar Compose y K3s en paralelo; migrar tráfico gradualmente mediante
+  ponderación DNS.
+- [ ] Portar los escenarios de [resilience-lab](./resilience-lab/README.md) a
+  Kubernetes (terminación de Pods/nodos con Chaos Mesh o Litmus) y verificar
+  los SLO.
+- [x] Probar respaldo y restauración aislada de MariaDB, MongoDB y definiciones
+  RabbitMQ; no se respaldan los mensajes RabbitMQ.
+- [x] Añadir scripts locales de respaldo y verificación de restauración
+  aislada; los mensajes RabbitMQ siguen pendientes.
+- [ ] Escribir runbooks de despliegue, reversión, pérdida de nodo, acumulación
+  de cola e incidentes de seguridad.
+- [ ] Retirar HAProxy/Keepalived de la ruta productiva.
+
+## Estructura propuesta del repositorio
 
 ```text
 infra/terraform/{modules,envs/dev,envs/prod}
-clusters/{dev,prod}/            # Flux entrypoints
+clusters/{dev,prod}/            # puntos de entrada de Flux
 deploy/{base,overlays/dev,overlays/prod}
 deploy/platform/{operators,rabbitmq,observability,wazuh,cert-manager}
-worker/                          # queue consumer
+worker/                          # consumidor de colas
 .github/workflows/{ci.yml,release.yml,terraform.yml}
 ```
 
-## Suggested order
+## Orden sugerido
 
-1. Phase 0 and 1 (images, Terraform, K3s).
-2. Phase 5 bootstrap (Flux) so everything after is deployed via Git.
-3. Phase 2 (stateless apps, then data operators).
-4. Phase 4 (CI/CD) alongside Phase 2.
-5. Phase 6 (OTel + LGTM) before introducing queues, so queue work is traceable.
-6. Phase 3 (RabbitMQ + worker).
-7. Phase 7 (Wazuh and hardening), then Phase 8 cutover.
+1. Fases 0 y 1 (imágenes, Terraform y K3s).
+2. Inicio de Flux (fase 5) para gestionar el resto mediante Git.
+3. Fase 2 (aplicaciones sin estado y luego operadores de datos).
+4. Fase 4 (CI/CD) en paralelo con la fase 2.
+5. Fase 6 (OTel + LGTM) antes de incorporar colas, para que estas sean
+   observables desde el principio.
+6. Fase 3 (RabbitMQ + worker).
+7. Fase 7 (Wazuh y endurecimiento), seguida de la fase 8 de migración.

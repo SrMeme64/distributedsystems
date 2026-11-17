@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: store
+
+resources:
+  - namespace.yaml
+  - api.yaml
+  - web.yaml
+  - mariadb.yaml
+  - mongodb.yaml
+  - redis.yaml
+  - disruption-budgets.yaml
+
+configMapGenerator:
+  - name: catalog-init
+    files:
+      - 10-catalog.sql=catalog.sql
+  - name: mongodb-init
+    files:
+      - 10-create-app-user.js=mongodb-init.js
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: distributed-store
+    includeSelectors: true

@@ -1,0 +1,37 @@
+#cloud-config
+hostname: ${hostname}
+manage_etc_hosts: true
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - openssh-server
+  - qemu-guest-agent
+users:
+  - default
+  - name: ubuntu
+    groups: [adm, sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+      - ${jsonencode(ssh_public_key)}
+write_files:
+  - path: /usr/local/sbin/install-k3s.sh
+    owner: root:root
+    permissions: "0700"
+    content: |
+      #!/usr/bin/env bash
+      set -Eeuo pipefail
+      curl --fail --silent --show-error --location https://get.k3s.io --output /run/k3s-install.sh
+      chmod 0700 /run/k3s-install.sh
+      export K3S_TOKEN=${jsonencode(k3s_token)}
+      export INSTALL_K3S_VERSION=${jsonencode(k3s_version)}
+      export INSTALL_K3S_EXEC=${jsonencode(
+        bootstrap
+        ? "server --cluster-init --tls-san ${api_vip} --node-name ${hostname}"
+        : "server --server ${server_url} --tls-san ${api_vip} --node-name ${hostname}"
+      )}
+      /run/k3s-install.sh
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]
+  - [/usr/local/sbin/install-k3s.sh]

@@ -1,70 +1,73 @@
-# Backlog: Additional Technologies and Suggestions
+# Pendientes: tecnologías y propuestas adicionales
 
-Candidate additions to the stack in
-[PLATFORM-MIGRATION-PLAN.md](./PLATFORM-MIGRATION-PLAN.md). None are committed
-to the plan yet.
+Posibles incorporaciones al stack descrito en
+[PLATFORM-MIGRATION-PLAN.md](./PLATFORM-MIGRATION-PLAN.md). Ninguna de estas
+propuestas forma parte del plan aprobado todavía.
 
-## Recommended first picks
+## Primeras opciones recomendadas
 
-- [ ] Longhorn (replicated storage)
-- [ ] MinIO + Velero (backups, object storage)
-- [ ] KEDA (queue-based autoscaling)
-- [ ] Kyverno (policy engine)
-- [ ] Falco (runtime detection)
-- [ ] External Secrets + Vault or OpenBao
-- [ ] Cilium (CNI, NetworkPolicies, mTLS, Hubble)
-- [ ] Flyway (schema migrations)
-- [ ] Renovate (dependency and chart updates)
+- [ ] Longhorn (almacenamiento replicado)
+- [ ] MinIO + Velero (respaldos y almacenamiento de objetos)
+- [ ] KEDA (escalado basado en colas)
+- [ ] Kyverno (motor de políticas)
+- [ ] Falco (detección en tiempo de ejecución)
+- [ ] External Secrets + Vault u OpenBao
+- [ ] Cilium (CNI, NetworkPolicies, mTLS y Hubble)
+- [ ] Flyway (migraciones de esquema)
+- [ ] Renovate (actualizaciones de dependencias y charts)
 
-## Reliability and operations
+## Confiabilidad y operación
 
-- [ ] **Backup and DR**: Velero for cluster and volume backups; MariaDB Operator
-  backup CRDs and MongoDB backups to object storage. The plan mentions restore
-  tests but names no tooling.
-- [ ] **Object storage (MinIO)**: shared target for backups, Loki/Tempo storage,
-  and Mimir blocks.
-- [ ] **Persistent storage**: K3s local-path is not replicated; use Longhorn or
-  Rook-Ceph for stateful workloads.
-- [ ] **Autoscaling**: KEDA for queue-based scaling (optional in the plan),
-  plus metrics-server and VPA.
-- [ ] **Progressive delivery**: Flagger or Argo Rollouts for canaries with
-  automatic rollback driven by Mimir metrics.
+- [ ] **Respaldo y recuperación ante desastres (DR):** Velero para respaldos
+  del clúster y volúmenes; CRD de respaldo de MariaDB Operator y respaldos de
+  MongoDB en almacenamiento de objetos. El plan pide pruebas de restauración,
+  pero todavía no selecciona herramientas.
+- [ ] **Almacenamiento de objetos (MinIO):** destino compartido para
+  respaldos y almacenamiento de Loki, Tempo y bloques de Mimir.
+- [ ] **Almacenamiento persistente:** `local-path` de K3s no se replica; usar
+  Longhorn o Rook-Ceph para cargas con estado.
+- [ ] **Escalado automático:** KEDA para escalar según colas (opcional en el
+  plan), además de `metrics-server` y VPA.
+- [ ] **Despliegue progresivo:** Flagger o Argo Rollouts para canarios con
+  reversión automática guiada por métricas de Mimir.
 
-## Security
+## Seguridad
 
-- [ ] **Policy engine**: Kyverno or OPA Gatekeeper (the plan already assumes
-  Kyverno for cosign verification).
-- [ ] **Runtime detection**: Falco for syscall-level container detection,
-  complementing host-focused Wazuh.
-- [ ] **Secrets**: HashiCorp Vault or OpenBao with External Secrets Operator;
-  stronger than SOPS if rotation or dynamic DB credentials are needed.
-- [ ] **Identity**: Keycloak or Authentik for API and Grafana SSO/OIDC.
-- [ ] **CNI / mesh**: Cilium for NetworkPolicies, mTLS, and Hubble network
-  observability (lighter than Istio).
-- [ ] **Supply chain**: Syft and Grype for SBOMs; SLSA provenance via GitHub
-  attestation actions.
+- [ ] **Motor de políticas:** Kyverno u OPA Gatekeeper (el plan ya contempla
+  Kyverno para verificar firmas de cosign).
+- [ ] **Detección en tiempo de ejecución:** Falco para detectar actividad de
+  contenedores a nivel de llamadas al sistema, como complemento de Wazuh,
+  enfocado en hosts.
+- [ ] **Secretos:** HashiCorp Vault u OpenBao con External Secrets Operator;
+  ofrece más capacidades que SOPS cuando se necesitan rotación o credenciales
+  dinámicas para bases de datos.
+- [ ] **Identidad:** Keycloak o Authentik para SSO/OIDC de la API y Grafana.
+- [ ] **CNI / malla de servicios:** Cilium para NetworkPolicies, mTLS y
+  observabilidad de red con Hubble (más ligero que Istio).
+- [ ] **Cadena de suministro:** Syft y Grype para SBOM; procedencia SLSA con
+  GitHub Attestation Actions.
 
-## Delivery and quality
+## Entrega y calidad
 
-- [ ] **IaC scanning and pre-commit**: pre-commit hooks, tflint, Checkov, Trivy
-  config scanning.
-- [ ] **Dependency updates**: Renovate (or Dependabot) for Helm charts and
-  images; works well with Flux.
-- [ ] **Load and chaos testing**: k6 to replace Siege, ab, and JMeter on
-  Kubernetes; Chaos Mesh for fault injection.
-- [ ] **Ephemeral PR environments**: Flux or vcluster preview environments per
-  pull request.
+- [ ] **Análisis de IaC y pre-commit:** hooks de pre-commit, tflint, Checkov y
+  análisis de configuración con Trivy.
+- [ ] **Actualización de dependencias:** Renovate (o Dependabot) para charts
+  Helm e imágenes; se integra bien con Flux.
+- [ ] **Pruebas de carga y caos:** k6 como alternativa a Siege, `ab` y JMeter
+  en Kubernetes; Chaos Mesh para inyección de fallas.
+- [ ] **Entornos efímeros para PR:** Flux o vcluster para crear un entorno de
+  prueba por pull request.
 
-## Data
+## Datos
 
-- [ ] **Schema migrations**: Flyway or Liquibase run as Kubernetes Jobs
-  (ToDo.md calls for migrations but names no tool).
-- [ ] **Exporters**: Prometheus exporters for MariaDB, MongoDB, Redis, and
+- [ ] **Migraciones de esquema:** ejecutar Flyway o Liquibase como Jobs de
+  Kubernetes (`ToDo.md` solicita migraciones, pero no selecciona herramienta).
+- [ ] **Exporters:** Prometheus exporters para MariaDB, MongoDB, Redis y
   RabbitMQ.
 
-## Other
+## Otros
 
-- [ ] **Developer experience**: Tilt or Skaffold for local Kubernetes
-  iteration; Makefile or Taskfile wrapping common commands.
-- [ ] **Documentation**: architecture decision records (ADRs), e.g. RabbitMQ vs.
-  NATS.
+- [ ] **Experiencia de desarrollo:** Tilt o Skaffold para iterar en Kubernetes;
+  Makefile o Taskfile para agrupar comandos habituales.
+- [ ] **Documentación:** registros de decisiones arquitectónicas (ADR), por
+  ejemplo, RabbitMQ frente a NATS.
